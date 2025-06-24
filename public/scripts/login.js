@@ -109,6 +109,14 @@ async function performLogin(handle, password) {
         password: password,
     };
 
+    const loginButton = $('#loginButton');
+    const loginText = loginButton.find('.login-text');
+    const spinner = loginButton.find('.spinner');
+
+    loginText.hide();
+    spinner.show();
+    loginButton.prop('disabled', true);
+
     try {
         const response = await fetch('/api/users/login', {
             method: 'POST',
@@ -121,7 +129,11 @@ async function performLogin(handle, password) {
 
         if (!response.ok) {
             const errorData = await response.json();
-            return displayError(errorData.error || 'An error occurred');
+            displayError(errorData.error || 'An error occurred');
+            loginText.show();
+            spinner.hide();
+            loginButton.prop('disabled', false);
+            return;
         }
 
         const data = await response.json();
@@ -133,6 +145,9 @@ async function performLogin(handle, password) {
     } catch (error) {
         console.error('Error logging in:', error);
         displayError(String(error));
+        loginText.show();
+        spinner.hide();
+        loginButton.prop('disabled', false);
     }
 }
 
