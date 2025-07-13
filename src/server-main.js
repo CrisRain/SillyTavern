@@ -62,7 +62,7 @@ import {
     color,
     removeColorFormatting,
     getSeparator,
-    safeReadFileSync,
+    safeReadFile,
     setupLogLevel,
     setWindowTitle,
 } from './util.js';
@@ -102,162 +102,183 @@ try {
 }
 
 const app = express();
-app.use(helmet({
-    contentSecurityPolicy: false,
-}));
-app.use(compression());
-app.use(responseTime());
 
-app.use(bodyParser.json({ limit: '200mb' }));
-app.use(bodyParser.urlencoded({ extended: true, limit: '200mb' }));
+async function main() {
+    app.use(helmet({
+        contentSecurityPolicy: false,
+    }));
+    app.use(compression());
+    app.use(responseTime());
 
-// CORS Settings //
-const CORS = cors({
-    origin: 'null',
-    methods: ['OPTIONS'],
-});
+    app.use(bodyParser.json({ limit: '200mb' }));
+    app.use(bodyParser.urlencoded({ extended: true, limit: '200mb' }));
 
-app.use(CORS);
-
-if (cliArgs.listen && cliArgs.basicAuthMode) {
-    app.use(basicAuthMiddleware);
-}
-
-if (cliArgs.whitelistMode) {
-    const whitelistMiddleware = await getWhitelistMiddleware();
-    app.use(whitelistMiddleware);
-}
-
-if (cliArgs.listen) {
-    app.use(accessLoggerMiddleware());
-}
-
-if (cliArgs.enableCorsProxy) {
-    app.use('/proxy/:url(*)', corsProxyMiddleware);
-} else {
-    app.use('/proxy/:url(*)', async (_, res) => {
-        const message = 'CORS proxy is disabled. Enable it in config.yaml or use the --corsProxy flag.';
-        console.log(message);
-        res.status(404).send(message);
-    });
-}
-
-app.use(cookieSession({
-    name: getCookieSessionName(),
-    sameSite: 'lax',
-    httpOnly: true,
-    maxAge: getSessionCookieAge(),
-    secret: getCookieSecret(globalThis.DATA_ROOT),
-}));
-
-app.use(setUserDataMiddleware);
-
-// CSRF Protection //
-if (!cliArgs.disableCsrf) {
-    const csrfSyncProtection = csrfSync({
-        getTokenFromState: (req) => {
-            if (!req.session) {
-                console.error('(CSRF error) getTokenFromState: Session object not initialized');
-                return;
-            }
-            return req.session.csrfToken;
-        },
-        getTokenFromRequest: (req) => {
-            return req.headers['x-csrf-token']?.toString();
-        },
-        storeTokenInState: (req, token) => {
-            if (!req.session) {
-                console.error('(CSRF error) storeTokenInState: Session object not initialized');
-                return;
-            }
-            req.session.csrfToken = token;
-        },
-        size: 32,
+    // CORS Settings //
+    const CORS = cors({
+        origin: 'null',
+        methods: ['OPTIONS'],
     });
 
-    app.get('/csrf-token', (req, res) => {
-        res.json({
-            'token': csrfSyncProtection.generateToken(req),
+    app.use(CORS);
+
+    if (cliArgs.listen && cliArgs.basicAuthMode) {
+        app.use(basicAuthMiddleware);
+    }
+
+    if (cliArgs.whitelistMode) {
+        const whitelistMiddleware = await getWhitelistMiddleware();
+        app.use(whitelistMiddleware);
+    }
+
+    if (cliArgs.listen) {
+        app.use(accessLoggerMiddleware());
+    }
+
+    if (cliArgs.enableCorsProxy) {
+        app.use('/proxy/:url(*)', corsProxyMiddleware);
+    } else {
+        app.use('/proxy/:url(*)', async (_, res) => {
+            const message = 'CORS proxy is disabled. Enable it in config.yaml or use the --corsProxy flag.';
+            console.log(message);
+            res.status(404).send(message);
         });
-    });
+    }
 
-    // Customize the error message
-    csrfSyncProtection.invalidCsrfTokenError.message = color.red('Invalid CSRF token. Please refresh the page and try again.');
-    csrfSyncProtection.invalidCsrfTokenError.stack = undefined;
+    app.use(cookieSession({
+        name: getCookieSessionName(),
+        sameSite: 'lax',
+        httpOnly: true,
+        maxAge: getSessionCookieAge(),
+        secret: await getCookieSecret(globalThis.DATA_ROOT),
+    }));
 
-    app.use(csrfSyncProtection.csrfSynchronisedProtection);
-} else {
-    console.warn('\nCSRF protection is disabled. This will make your server vulnerable to CSRF attacks.\n');
-    app.get('/csrf-token', (req, res) => {
-        res.json({
-            'token': 'disabled',
+    app.use(setUserDataMiddleware);
+
+    // CSRF Protection //
+    if (!cliArgs.disableCsrf) {
+        const csrfSyncProtection = csrfSync({
+            getTokenFromState: (req) => {
+                if (!req.session) {
+                    console.error('(CSRF error) getTokenFromState: Session object not initialized');
+                    return;
+                }
+                return req.session.csrfToken;
+            },
+            getTokenFromRequest: (req) => {
+                return req.headers['x-csrf-token']?.toString();
+            },
+            storeTokenInState: (req, token) => {
+                if (!req.session) {
+                    console.error('(CSRF error) storeTokenInState: Session object not initialized');
+                    return;
+                }
+                req.session.csrfToken = token;
+            },
+            size: 32,
         });
-    });
-}
 
-// Static files
-// Host index page
-app.get('/', getCacheBusterMiddleware(), (request, response) => {
-    if (shouldRedirectToLogin(request)) {
+        app.get('/csrf-token', (req, res) => {
+            res.json({
+                'token': csrfSyncProtection.generateToken(req),
+            });
+        });
+
+        // Customize the error message
+        csrfSyncProtection.invalidCsrfTokenError.message = color.red('Invalid CSRF token. Please refresh the page and try again.');
+        csrfSyncProtection.invalidCsrfTokenError.stack = undefined;
+
+        app.use(csrfSyncProtection.csrfSynchronisedProtection);
+    } else {
+        console.warn('\nCSRF protection is disabled. This will make your server vulnerable to CSRF attacks.\n');
+        app.get('/csrf-token', (req, res) => {
+            res.json({
+                'token': 'disabled',
+            });
+        });
+    }
+
+    // Static files
+    // Host index page
+    app.get('/', getCacheBusterMiddleware(), (request, response) => {
+        if (shouldRedirectToLogin(request)) {
+            const query = request.url.split('?')[1];
+            const redirectUrl = query ? `/login?${query}` : '/login';
+            return response.redirect(redirectUrl);
+        }
+
+        return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
+    });
+
+    // Callback endpoint for OAuth PKCE flows (e.g. OpenRouter)
+    app.get('/callback/:source?', (request, response) => {
+        const source = request.params.source;
         const query = request.url.split('?')[1];
-        const redirectUrl = query ? `/login?${query}` : '/login';
-        return response.redirect(redirectUrl);
-    }
+        const searchParams = new URLSearchParams();
+        source && searchParams.set('source', source);
+        query && searchParams.set('query', query);
+        const path = `/?${searchParams.toString()}`;
+        return response.redirect(307, path);
+    });
 
-    return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
-});
+    // Host login page
+    app.get('/login', loginPageMiddleware);
 
-// Callback endpoint for OAuth PKCE flows (e.g. OpenRouter)
-app.get('/callback/:source?', (request, response) => {
-    const source = request.params.source;
-    const query = request.url.split('?')[1];
-    const searchParams = new URLSearchParams();
-    source && searchParams.set('source', source);
-    query && searchParams.set('query', query);
-    const path = `/?${searchParams.toString()}`;
-    return response.redirect(307, path);
-});
+    // Host frontend assets
+    const webpackMiddleware = getWebpackServeMiddleware();
+    app.use(webpackMiddleware);
+    app.use(express.static(path.join(serverDirectory, 'public'), {}));
 
-// Host login page
-app.get('/login', loginPageMiddleware);
+    // Public API
+    app.use('/api/users', usersPublicRouter);
 
-// Host frontend assets
-const webpackMiddleware = getWebpackServeMiddleware();
-app.use(webpackMiddleware);
-app.use(express.static(path.join(serverDirectory, 'public'), {}));
+    // Everything below this line requires authentication
+    app.use(requireLoginMiddleware);
+    app.post('/api/ping', (request, response) => {
+        if (request.query.extend && request.session) {
+            request.session.touch = Date.now();
+        }
 
-// Public API
-app.use('/api/users', usersPublicRouter);
+        response.sendStatus(204);
+    });
 
-// Everything below this line requires authentication
-app.use(requireLoginMiddleware);
-app.post('/api/ping', (request, response) => {
-    if (request.query.extend && request.session) {
-        request.session.touch = Date.now();
-    }
+    // File uploads
+    const uploadsPath = path.join(cliArgs.dataRoot, UPLOADS_DIRECTORY);
+    app.use(multer({ dest: uploadsPath, limits: { fieldSize: 10 * 1024 * 1024 } }).single('avatar'));
+    app.use(multerMonkeyPatch);
 
-    response.sendStatus(204);
-});
+    app.get('/version', async function (_, response) {
+        const data = await getVersion();
+        response.send(data);
+    });
 
-// File uploads
-const uploadsPath = path.join(cliArgs.dataRoot, UPLOADS_DIRECTORY);
-app.use(multer({ dest: uploadsPath, limits: { fieldSize: 10 * 1024 * 1024 } }).single('avatar'));
-app.use(multerMonkeyPatch);
+    redirectDeprecatedEndpoints(app);
+    setupPrivateEndpoints(app);
 
-app.get('/version', async function (_, response) {
-    const data = await getVersion();
-    response.send(data);
-});
-
-redirectDeprecatedEndpoints(app);
-setupPrivateEndpoints(app);
+    // User storage module needs to be initialized before starting the server
+    initUserStorage(globalThis.DATA_ROOT)
+        .then(ensurePublicDirectoriesExist)
+        .then(migrateUserData)
+        .then(migrateSystemPrompts)
+        .then(verifySecuritySettings)
+        .then(() => preSetupTasks(webpackMiddleware))
+        .then(apply404Middleware)
+        .then(() => new ServerStartup(app, cliArgs).start())
+        .then(postSetupTasks);
+}
 
 /**
  * Tasks that need to be run before the server starts listening.
  * @returns {Promise<void>}
  */
-async function preSetupTasks() {
-    const version = await getVersion();
+async function preSetupTasks(webpackMiddleware) {
+    const versionPromise = getVersion();
+    const directoriesPromise = getUserDirectoriesList();
+    const settingsInitPromise = settingsInit();
+    const statsInitPromise = statsInit();
+    const pluginsDirectory = path.join(serverDirectory, 'plugins');
+    const cleanupPluginsPromise = loadPlugins(app, pluginsDirectory);
+
+    const version = await versionPromise;
 
     // Print formatted header
     console.log();
@@ -271,18 +292,19 @@ async function preSetupTasks() {
     }
     console.log();
 
-    const directories = await getUserDirectoriesList();
-    await checkForNewContent(directories);
-    await ensureThumbnailCache(directories);
-    await diskCache.verify(directories);
+    const directories = await directoriesPromise;
+    await Promise.all([
+        checkForNewContent(directories),
+        ensureThumbnailCache(directories),
+        diskCache.verify(directories),
+    ]);
+
     cleanUploads();
     migrateAccessLog();
 
-    await settingsInit();
-    await statsInit();
-
-    const pluginsDirectory = path.join(serverDirectory, 'plugins');
-    const cleanupPlugins = await loadPlugins(app, pluginsDirectory);
+    await settingsInitPromise;
+    await statsInitPromise;
+    const cleanupPlugins = await cleanupPluginsPromise;
     const consoleTitle = process.title;
 
     let isExiting = false;
@@ -360,27 +382,18 @@ async function postSetupTasks(result) {
     console.log(goToLog);
     console.log('\n' + getSeparator(plainGoToLog.length) + '\n');
 
-    setupLogLevel();
+    await setupLogLevel();
     serverEvents.emit(EVENT_NAMES.SERVER_STARTED, { url: autorunUrl });
 }
 
 /**
  * Registers a not-found error response if a not-found error page exists. Should only be called after all other middlewares have been registered.
  */
-function apply404Middleware() {
-    const notFoundWebpage = safeReadFileSync(path.join(serverDirectory, 'public/error/url-not-found.html')) ?? '';
+async function apply404Middleware() {
+    const notFoundWebpage = (await safeReadFile(path.join(serverDirectory, 'public/error/url-not-found.html'))) ?? '';
     app.use((req, res) => {
         res.status(404).send(notFoundWebpage);
     });
 }
 
-// User storage module needs to be initialized before starting the server
-initUserStorage(globalThis.DATA_ROOT)
-    .then(ensurePublicDirectoriesExist)
-    .then(migrateUserData)
-    .then(migrateSystemPrompts)
-    .then(verifySecuritySettings)
-    .then(preSetupTasks)
-    .then(apply404Middleware)
-    .then(() => new ServerStartup(app, cliArgs).start())
-    .then(postSetupTasks);
+main();

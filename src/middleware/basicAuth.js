@@ -5,20 +5,23 @@
 import { Buffer } from 'node:buffer';
 import storage from 'node-persist';
 import { getAllUserHandles, toKey, getPasswordHash } from '../users.js';
-import { getConfigValue, safeReadFileSync } from '../util.js';
-
-const PER_USER_BASIC_AUTH = getConfigValue('perUserBasicAuth', false, 'boolean');
-const ENABLE_ACCOUNTS = getConfigValue('enableUserAccounts', false, 'boolean');
+import { getConfigValue, safeReadFile } from '../util.js';
 
 const basicAuthMiddleware = async function (request, response, callback) {
-    const unauthorizedWebpage = safeReadFileSync('./public/error/unauthorized.html') ?? '';
+    const [PER_USER_BASIC_AUTH, ENABLE_ACCOUNTS, unauthorizedWebpage] = await Promise.all([
+        getConfigValue('perUserBasicAuth', false, 'boolean'),
+        getConfigValue('enableUserAccounts', false, 'boolean'),
+        safeReadFile('./public/error/unauthorized.html'),
+    ]);
     const unauthorizedResponse = (res) => {
         res.set('WWW-Authenticate', 'Basic realm="SillyTavern", charset="UTF-8"');
         return res.status(401).send(unauthorizedWebpage);
     };
 
-    const basicAuthUserName = getConfigValue('basicAuthUser.username');
-    const basicAuthUserPassword = getConfigValue('basicAuthUser.password');
+    const [basicAuthUserName, basicAuthUserPassword] = await Promise.all([
+        getConfigValue('basicAuthUser.username'),
+        getConfigValue('basicAuthUser.password'),
+    ]);
     const authHeader = request.headers.authorization;
 
     if (!authHeader) {

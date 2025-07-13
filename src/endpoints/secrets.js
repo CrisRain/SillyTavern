@@ -1,8 +1,8 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import express from 'express';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 import { getConfigValue } from '../util.js';
 
 export const SECRETS_FILE = 'secrets.json';
@@ -70,18 +70,20 @@ const EXPORTABLE_KEYS = [
  * @param {string} key Secret key
  * @param {string} value Secret value
  */
-export function writeSecret(directories, key, value) {
+export async function writeSecret(directories, key, value) {
     const filePath = path.join(directories.root, SECRETS_FILE);
 
-    if (!fs.existsSync(filePath)) {
+    try {
+        await fs.access(filePath);
+    } catch {
         const emptyFile = JSON.stringify({});
-        writeFileAtomicSync(filePath, emptyFile, 'utf-8');
+        await writeFileAtomic(filePath, emptyFile, 'utf-8');
     }
 
-    const fileContents = fs.readFileSync(filePath, 'utf-8');
+    const fileContents = await fs.readFile(filePath, 'utf-8');
     const secrets = JSON.parse(fileContents);
     secrets[key] = value;
-    writeFileAtomicSync(filePath, JSON.stringify(secrets, null, 4), 'utf-8');
+    await writeFileAtomic(filePath, JSON.stringify(secrets, null, 4), 'utf-8');
 }
 
 /**
@@ -90,33 +92,37 @@ export function writeSecret(directories, key, value) {
  * @param {string} key Secret key
  * @returns
  */
-export function deleteSecret(directories, key) {
+export async function deleteSecret(directories, key) {
     const filePath = path.join(directories.root, SECRETS_FILE);
 
-    if (!fs.existsSync(filePath)) {
+    try {
+        await fs.access(filePath);
+    } catch {
         return;
     }
 
-    const fileContents = fs.readFileSync(filePath, 'utf-8');
+    const fileContents = await fs.readFile(filePath, 'utf-8');
     const secrets = JSON.parse(fileContents);
     delete secrets[key];
-    writeFileAtomicSync(filePath, JSON.stringify(secrets, null, 4), 'utf-8');
+    await writeFileAtomic(filePath, JSON.stringify(secrets, null, 4), 'utf-8');
 }
 
 /**
  * Reads a secret from the secrets file
  * @param {import('../users.js').UserDirectoryList} directories User directories
  * @param {string} key Secret key
- * @returns {string} Secret value
+ * @returns {Promise<string>} Secret value
  */
-export function readSecret(directories, key) {
+export async function readSecret(directories, key) {
     const filePath = path.join(directories.root, SECRETS_FILE);
 
-    if (!fs.existsSync(filePath)) {
+    try {
+        await fs.access(filePath);
+    } catch {
         return '';
     }
 
-    const fileContents = fs.readFileSync(filePath, 'utf-8');
+    const fileContents = await fs.readFile(filePath, 'utf-8');
     const secrets = JSON.parse(fileContents);
     return secrets[key];
 }
@@ -124,16 +130,18 @@ export function readSecret(directories, key) {
 /**
  * Reads the secret state from the secrets file
  * @param {import('../users.js').UserDirectoryList} directories User directories
- * @returns {object} Secret state
+ * @returns {Promise<object>} Secret state
  */
-export function readSecretState(directories) {
+export async function readSecretState(directories) {
     const filePath = path.join(directories.root, SECRETS_FILE);
 
-    if (!fs.existsSync(filePath)) {
+    try {
+        await fs.access(filePath);
+    } catch {
         return {};
     }
 
-    const fileContents = fs.readFileSync(filePath, 'utf8');
+    const fileContents = await fs.readFile(filePath, 'utf8');
     const secrets = JSON.parse(fileContents);
     const state = {};
 
@@ -147,34 +155,36 @@ export function readSecretState(directories) {
 /**
  * Reads all secrets from the secrets file
  * @param {import('../users.js').UserDirectoryList} directories User directories
- * @returns {Record<string, string> | undefined} Secrets
+ * @returns {Promise<Record<string, string> | undefined>} Secrets
  */
-export function getAllSecrets(directories) {
+export async function getAllSecrets(directories) {
     const filePath = path.join(directories.root, SECRETS_FILE);
 
-    if (!fs.existsSync(filePath)) {
+    try {
+        await fs.access(filePath);
+    } catch {
         console.error('Secrets file does not exist');
         return undefined;
     }
 
-    const fileContents = fs.readFileSync(filePath, 'utf8');
+    const fileContents = await fs.readFile(filePath, 'utf8');
     const secrets = JSON.parse(fileContents);
     return secrets;
 }
 
 export const router = express.Router();
 
-router.post('/write', (request, response) => {
+router.post('/write', async (request, response) => {
     const key = request.body.key;
     const value = request.body.value;
 
-    writeSecret(request.user.directories, key, value);
+    await writeSecret(request.user.directories, key, value);
     return response.send('ok');
 });
 
-router.post('/read', (request, response) => {
+router.post('/read', async (request, response) => {
     try {
-        const state = readSecretState(request.user.directories);
+        const state = await readSecretState(request.user.directories);
         return response.send(state);
     } catch (error) {
         console.error(error);
@@ -183,7 +193,7 @@ router.post('/read', (request, response) => {
 });
 
 router.post('/view', async (request, response) => {
-    const allowKeysExposure = getConfigValue('allowKeysExposure', false, 'boolean');
+    const allowKeysExposure = await getConfigValue('allowKeysExposure', false, 'boolean');
 
     if (!allowKeysExposure) {
         console.error('secrets.json could not be viewed unless the value of allowKeysExposure in config.yaml is set to true');
@@ -191,7 +201,7 @@ router.post('/view', async (request, response) => {
     }
 
     try {
-        const secrets = getAllSecrets(request.user.directories);
+        const secrets = await getAllSecrets(request.user.directories);
 
         if (!secrets) {
             return response.sendStatus(404);
@@ -204,8 +214,8 @@ router.post('/view', async (request, response) => {
     }
 });
 
-router.post('/find', (request, response) => {
-    const allowKeysExposure = getConfigValue('allowKeysExposure', false, 'boolean');
+router.post('/find', async (request, response) => {
+    const allowKeysExposure = await getConfigValue('allowKeysExposure', false, 'boolean');
     const key = request.body.key;
 
     if (!allowKeysExposure && !EXPORTABLE_KEYS.includes(key)) {
@@ -214,7 +224,7 @@ router.post('/find', (request, response) => {
     }
 
     try {
-        const secret = readSecret(request.user.directories, key);
+        const secret = await readSecret(request.user.directories, key);
 
         if (!secret) {
             return response.sendStatus(404);

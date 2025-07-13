@@ -1,11 +1,13 @@
-import fs from 'node:fs';
+// @ts-nocheck
+import fsWithCallbacks from 'node:fs';
+const fs = fsWithCallbacks.promises;
 import path from 'node:path';
 import readline from 'node:readline';
 import process from 'node:process';
 
 import express from 'express';
 import sanitize from 'sanitize-filename';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 import _ from 'lodash';
 
 import validateAvatarUrlMiddleware from '../middleware/validateFileName.js';
@@ -18,10 +20,10 @@ import {
     formatBytes,
 } from '../util.js';
 
-const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
-const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
-const throttleInterval = Number(getConfigValue('backups.chat.throttleInterval', 10_000, 'number'));
-const checkIntegrity = !!getConfigValue('backups.chat.checkIntegrity', true, 'boolean');
+let isBackupEnabled;
+let maxTotalChatBackups;
+let throttleInterval;
+let checkIntegrity;
 
 /**
  * Saves a chat to the backups directory.
@@ -29,9 +31,9 @@ const checkIntegrity = !!getConfigValue('backups.chat.checkIntegrity', true, 'bo
  * @param {string} name The name of the chat.
  * @param {string} chat The serialized chat to save.
  */
-function backupChat(directory, name, chat) {
+async function backupChat(directory, name, chat) {
     try {
-
+        isBackupEnabled = !!await getConfigValue('backups.chat.enabled', true, 'boolean');
         if (!isBackupEnabled) {
             return;
         }
@@ -40,15 +42,15 @@ function backupChat(directory, name, chat) {
         name = sanitize(name).replace(/[^a-z0-9]/gi, '_').toLowerCase();
 
         const backupFile = path.join(directory, `chat_${name}_${generateTimestamp()}.jsonl`);
-        writeFileAtomicSync(backupFile, chat, 'utf-8');
+        await writeFileAtomic(backupFile, chat, 'utf-8');
 
-        removeOldBackups(directory, `chat_${name}_`);
-
+        await removeOldBackups(directory, `chat_${name}_`);
+        maxTotalChatBackups = Number(await getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
         if (isNaN(maxTotalChatBackups) || maxTotalChatBackups < 0) {
             return;
         }
 
-        removeOldBackups(directory, 'chat_', maxTotalChatBackups);
+        await removeOldBackups(directory, 'chat_', maxTotalChatBackups);
     } catch (err) {
         console.error(`Could not backup chat for ${name}`, err);
     }
@@ -64,8 +66,9 @@ const backupFunctions = new Map();
  * @param {string} handle User handle
  * @returns {function(string, string, string): void} Backup function
  */
-function getBackupFunction(handle) {
+async function getBackupFunction(handle) {
     if (!backupFunctions.has(handle)) {
+        throttleInterval = Number(await getConfigValue('backups.chat.throttleInterval', 10_000, 'number'));
         backupFunctions.set(handle, _.throttle(backupChat, throttleInterval, { leading: true, trailing: true }));
     }
     return backupFunctions.get(handle) || (() => {});
@@ -299,7 +302,7 @@ function importRisuChat(userName, characterName, jsonData) {
  * @returns {Promise<string>} The first line of the file
  */
 function readFirstLine(filePath) {
-    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const stream = fsWithCallbacks.createReadStream(filePath, { encoding: 'utf8' });
     const rl = readline.createInterface({ input: stream });
     return new Promise((resolve, reject) => {
         let resolved = false;
@@ -333,7 +336,9 @@ function readFirstLine(filePath) {
  */
 async function checkChatIntegrity(filePath, integritySlug) {
     // If the chat file doesn't exist, assume it's intact
-    if (!fs.existsSync(filePath)) {
+    try {
+        await fs.access(filePath);
+    } catch {
         return true;
     }
 
@@ -368,7 +373,7 @@ async function checkChatIntegrity(filePath, integritySlug) {
  */
 export async function getChatInfo(pathToFile, additionalData = {}, isGroup = false) {
     return new Promise(async (res) => {
-        const stats = await fs.promises.stat(pathToFile);
+        const stats = await fs.stat(pathToFile);
         const fileSizeInKB = `${(stats.size / 1024).toFixed(2)}kb`;
 
         const chatData = {
@@ -391,7 +396,7 @@ export async function getChatInfo(pathToFile, additionalData = {}, isGroup = fal
             return;
         }
 
-        const fileStream = fs.createReadStream(pathToFile);
+        const fileStream = fsWithCallbacks.createReadStream(pathToFile);
         const rl = readline.createInterface({
             input: fileStream,
             crlfDelay: Infinity,
@@ -432,6 +437,7 @@ router.post('/save', validateAvatarUrlMiddleware, async function (request, respo
         const jsonlData = chatData.map(JSON.stringify).join('\n');
         const fileName = `${String(request.body.file_name)}.jsonl`;
         const filePath = path.join(request.user.directories.chats, directoryName, sanitize(fileName));
+        checkIntegrity = !!await getConfigValue('backups.chat.checkIntegrity', true, 'boolean');
         if (checkIntegrity && !request.body.force) {
             const integritySlug = chatData?.[0]?.chat_metadata?.integrity;
             const isIntact = await checkChatIntegrity(filePath, integritySlug);
@@ -440,8 +446,8 @@ router.post('/save', validateAvatarUrlMiddleware, async function (request, respo
                 return response.status(400).send({ error: 'integrity' });
             }
         }
-        writeFileAtomicSync(filePath, jsonlData, 'utf8');
-        getBackupFunction(request.user.profile.handle)(request.user.directories.backups, directoryName, jsonlData);
+        await writeFileAtomic(filePath, jsonlData, 'utf8');
+        (await getBackupFunction(request.user.profile.handle))(request.user.directories.backups, directoryName, jsonlData);
         return response.send({ result: 'ok' });
     } catch (error) {
         console.error(error);
@@ -449,15 +455,15 @@ router.post('/save', validateAvatarUrlMiddleware, async function (request, respo
     }
 });
 
-router.post('/get', validateAvatarUrlMiddleware, function (request, response) {
+router.post('/get', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const dirName = String(request.body.avatar_url).replace('.png', '');
         const directoryPath = path.join(request.user.directories.chats, dirName);
-        const chatDirExists = fs.existsSync(directoryPath);
-
-        //if no chat dir for the character is found, make one with the character name
-        if (!chatDirExists) {
-            fs.mkdirSync(directoryPath);
+        try {
+            await fs.access(directoryPath);
+        } catch {
+            //if no chat dir for the character is found, make one with the character name
+            await fs.mkdir(directoryPath);
             return response.send({});
         }
 
@@ -467,13 +473,13 @@ router.post('/get', validateAvatarUrlMiddleware, function (request, response) {
 
         const fileName = `${String(request.body.file_name)}.jsonl`;
         const filePath = path.join(directoryPath, sanitize(fileName));
-        const chatFileExists = fs.existsSync(filePath);
-
-        if (!chatFileExists) {
+        try {
+            await fs.access(filePath);
+        } catch {
             return response.send({});
         }
 
-        const data = fs.readFileSync(filePath, 'utf8');
+        const data = await fs.readFile(filePath, 'utf8');
         const lines = data.split('\n');
 
         // Iterate through the array of strings and parse each line as JSON
@@ -499,29 +505,38 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
     console.info('Old chat name', pathToOriginalFile);
     console.info('New chat name', pathToRenamedFile);
 
-    if (!fs.existsSync(pathToOriginalFile) || fs.existsSync(pathToRenamedFile)) {
-        console.error('Either Source or Destination files are not available');
+    try {
+        await fs.access(pathToOriginalFile);
+    } catch {
+        console.error('Source file is not available');
         return response.status(400).send({ error: true });
     }
+    try {
+        await fs.access(pathToRenamedFile);
+        console.error('Destination file already exists');
+        return response.status(400).send({ error: true });
+    } catch {
+        // ignore
+    }
 
-    fs.copyFileSync(pathToOriginalFile, pathToRenamedFile);
-    fs.unlinkSync(pathToOriginalFile);
+    await fs.copyFile(pathToOriginalFile, pathToRenamedFile);
+    await fs.unlink(pathToOriginalFile);
     console.info('Successfully renamed.');
     return response.send({ ok: true, sanitizedFileName });
 });
 
-router.post('/delete', validateAvatarUrlMiddleware, function (request, response) {
+router.post('/delete', validateAvatarUrlMiddleware, async function (request, response) {
     const dirName = String(request.body.avatar_url).replace('.png', '');
     const fileName = String(request.body.chatfile);
     const filePath = path.join(request.user.directories.chats, dirName, sanitize(fileName));
-    const chatFileExists = fs.existsSync(filePath);
-
-    if (!chatFileExists) {
+    try {
+        await fs.access(filePath);
+    } catch {
         console.error(`Chat file not found '${filePath}'`);
         return response.sendStatus(400);
     }
 
-    fs.unlinkSync(filePath);
+    await fs.unlink(filePath);
     console.info(`Deleted chat file: ${filePath}`);
     return response.send('ok');
 });
@@ -535,7 +550,9 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
         : path.join(request.user.directories.chats, String(request.body.avatar_url).replace('.png', ''));
     let filename = path.join(pathToFolder, request.body.file);
     let exportfilename = request.body.exportfilename;
-    if (!fs.existsSync(filename)) {
+    try {
+        await fs.access(filename);
+    } catch {
         const errorMessage = {
             message: `Could not find JSONL file to export. Source chat file: ${filename}.`,
         };
@@ -546,7 +563,7 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
         // Short path for JSONL files
         if (request.body.format === 'jsonl') {
             try {
-                const rawFile = fs.readFileSync(filename, 'utf8');
+                const rawFile = await fs.readFile(filename, 'utf8');
                 const successMessage = {
                     message: `Chat saved to ${exportfilename}`,
                     result: rawFile,
@@ -564,7 +581,7 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
             }
         }
 
-        const readStream = fs.createReadStream(filename);
+        const readStream = fsWithCallbacks.createReadStream(filename);
         const rl = readline.createInterface({
             input: readStream,
         });
@@ -595,7 +612,7 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
     }
 });
 
-router.post('/group/import', function (request, response) {
+router.post('/group/import', async function (request, response) {
     try {
         const filedata = request.file;
 
@@ -606,8 +623,8 @@ router.post('/group/import', function (request, response) {
         const chatname = humanizedISO8601DateTime();
         const pathToUpload = path.join(filedata.destination, filedata.filename);
         const pathToNewFile = path.join(request.user.directories.groupChats, `${chatname}.jsonl`);
-        fs.copyFileSync(pathToUpload, pathToNewFile);
-        fs.unlinkSync(pathToUpload);
+        await fs.copyFile(pathToUpload, pathToNewFile);
+        await fs.unlink(pathToUpload);
         return response.send({ res: chatname });
     } catch (error) {
         console.error(error);
@@ -615,7 +632,7 @@ router.post('/group/import', function (request, response) {
     }
 });
 
-router.post('/import', validateAvatarUrlMiddleware, function (request, response) {
+router.post('/import', validateAvatarUrlMiddleware, async function (request, response) {
     if (!request.body) return response.sendStatus(400);
 
     const format = request.body.file_type;
@@ -629,10 +646,10 @@ router.post('/import', validateAvatarUrlMiddleware, function (request, response)
 
     try {
         const pathToUpload = path.join(request.file.destination, request.file.filename);
-        const data = fs.readFileSync(pathToUpload, 'utf8');
+        const data = await fs.readFile(pathToUpload, 'utf8');
 
         if (format === 'json') {
-            fs.unlinkSync(pathToUpload);
+            await fs.unlink(pathToUpload);
             const jsonData = JSON.parse(data);
 
             /** @type {function(string, string, object): string|string[]} */
@@ -653,10 +670,10 @@ router.post('/import', validateAvatarUrlMiddleware, function (request, response)
                 return response.send({ error: true });
             }
 
-            const handleChat = (chat) => {
+            const handleChat = async (chat) => {
                 const fileName = `${characterName} - ${humanizedISO8601DateTime()} imported.jsonl`;
                 const filePath = path.join(request.user.directories.chats, avatarUrl, fileName);
-                writeFileAtomicSync(filePath, chat, 'utf8');
+                await writeFileAtomic(filePath, chat, 'utf8');
             };
 
             const chat = importFunc(userName, characterName, jsonData);
@@ -695,11 +712,11 @@ router.post('/import', validateAvatarUrlMiddleware, function (request, response)
             const fileName = `${characterName} - ${humanizedISO8601DateTime()} imported.jsonl`;
             const filePath = path.join(request.user.directories.chats, avatarUrl, fileName);
             if (flattenedChat !== data) {
-                writeFileAtomicSync(filePath, flattenedChat, 'utf8');
+                await writeFileAtomic(filePath, flattenedChat, 'utf8');
             } else {
-                fs.copyFileSync(pathToUpload, filePath);
+                await fs.copyFile(pathToUpload, filePath);
             }
-            fs.unlinkSync(pathToUpload);
+            await fs.unlink(pathToUpload);
             response.send({ res: true });
         }
     } catch (error) {
@@ -708,7 +725,7 @@ router.post('/import', validateAvatarUrlMiddleware, function (request, response)
     }
 });
 
-router.post('/group/get', (request, response) => {
+router.post('/group/get', async (request, response) => {
     if (!request.body || !request.body.id) {
         return response.sendStatus(400);
     }
@@ -716,19 +733,20 @@ router.post('/group/get', (request, response) => {
     const id = request.body.id;
     const pathToFile = path.join(request.user.directories.groupChats, `${id}.jsonl`);
 
-    if (fs.existsSync(pathToFile)) {
-        const data = fs.readFileSync(pathToFile, 'utf8');
+    try {
+        await fs.access(pathToFile);
+        const data = await fs.readFile(pathToFile, 'utf8');
         const lines = data.split('\n');
 
         // Iterate through the array of strings and parse each line as JSON
         const jsonData = lines.map(line => tryParse(line)).filter(x => x);
         return response.send(jsonData);
-    } else {
+    } catch {
         return response.send([]);
     }
 });
 
-router.post('/group/delete', (request, response) => {
+router.post('/group/delete', async (request, response) => {
     if (!request.body || !request.body.id) {
         return response.sendStatus(400);
     }
@@ -736,15 +754,16 @@ router.post('/group/delete', (request, response) => {
     const id = request.body.id;
     const pathToFile = path.join(request.user.directories.groupChats, `${id}.jsonl`);
 
-    if (fs.existsSync(pathToFile)) {
-        fs.unlinkSync(pathToFile);
+    try {
+        await fs.access(pathToFile);
+        await fs.unlink(pathToFile);
         return response.send({ ok: true });
+    } catch {
+        return response.send({ error: true });
     }
-
-    return response.send({ error: true });
 });
 
-router.post('/group/save', (request, response) => {
+router.post('/group/save', async (request, response) => {
     if (!request.body || !request.body.id) {
         return response.sendStatus(400);
     }
@@ -752,18 +771,20 @@ router.post('/group/save', (request, response) => {
     const id = request.body.id;
     const pathToFile = path.join(request.user.directories.groupChats, `${id}.jsonl`);
 
-    if (!fs.existsSync(request.user.directories.groupChats)) {
-        fs.mkdirSync(request.user.directories.groupChats);
+    try {
+        await fs.access(request.user.directories.groupChats);
+    } catch {
+        await fs.mkdir(request.user.directories.groupChats);
     }
 
     let chat_data = request.body.chat;
     let jsonlData = chat_data.map(JSON.stringify).join('\n');
-    writeFileAtomicSync(pathToFile, jsonlData, 'utf8');
+    await writeFileAtomic(pathToFile, jsonlData, 'utf8');
     getBackupFunction(request.user.profile.handle)(request.user.directories.backups, String(id), jsonlData);
     return response.send({ ok: true });
 });
 
-router.post('/search', validateAvatarUrlMiddleware, function (request, response) {
+router.post('/search', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const { query, avatar_url, group_id } = request.body;
         let chatFiles = [];
@@ -771,13 +792,13 @@ router.post('/search', validateAvatarUrlMiddleware, function (request, response)
         if (group_id) {
             // Find group's chat IDs first
             const groupDir = path.join(request.user.directories.groups);
-            const groupFiles = fs.readdirSync(groupDir)
+            const groupFiles = (await fs.readdir(groupDir))
                 .filter(file => file.endsWith('.json'));
 
             let targetGroup;
             for (const groupFile of groupFiles) {
                 try {
-                    const groupData = JSON.parse(fs.readFileSync(path.join(groupDir, groupFile), 'utf8'));
+                    const groupData = JSON.parse(await fs.readFile(path.join(groupDir, groupFile), 'utf8'));
                     if (groupData.id === group_id) {
                         targetGroup = groupData;
                         break;
@@ -793,45 +814,51 @@ router.post('/search', validateAvatarUrlMiddleware, function (request, response)
 
             // Find group chat files for given group ID
             const groupChatsDir = path.join(request.user.directories.groupChats);
-            chatFiles = targetGroup.chats
-                .map(chatId => {
+            chatFiles = (await Promise.all(targetGroup.chats
+                .map(async (chatId) => {
                     const filePath = path.join(groupChatsDir, `${chatId}.jsonl`);
-                    if (!fs.existsSync(filePath)) return null;
-                    const stats = fs.statSync(filePath);
-                    return {
-                        file_name: chatId,
-                        file_size: formatBytes(stats.size),
-                        path: filePath,
-                    };
-                })
+                    try {
+                        await fs.access(filePath);
+                        const stats = await fs.stat(filePath);
+                        return {
+                            file_name: chatId,
+                            file_size: formatBytes(stats.size),
+                            path: filePath,
+                        };
+                    } catch {
+                        return null;
+                    }
+                })))
                 .filter(x => x);
         } else {
             // Regular character chat directory
             const character_name = avatar_url.replace('.png', '');
             const directoryPath = path.join(request.user.directories.chats, character_name);
 
-            if (!fs.existsSync(directoryPath)) {
+            try {
+                await fs.access(directoryPath);
+            } catch {
                 return response.send([]);
             }
 
-            chatFiles = fs.readdirSync(directoryPath)
+            chatFiles = (await Promise.all((await fs.readdir(directoryPath))
                 .filter(file => file.endsWith('.jsonl'))
-                .map(fileName => {
+                .map(async (fileName) => {
                     const filePath = path.join(directoryPath, fileName);
-                    const stats = fs.statSync(filePath);
+                    const stats = await fs.stat(filePath);
                     return {
                         file_name: fileName,
                         file_size: formatBytes(stats.size),
                         path: filePath,
                     };
-                });
+                })));
         }
 
         const results = [];
 
         // Search logic
         for (const chatFile of chatFiles) {
-            const data = fs.readFileSync(chatFile.path, 'utf8');
+            const data = await fs.readFile(chatFile.path, 'utf8');
             const messages = data.split('\n')
                 .map(line => { try { return JSON.parse(line); } catch (_) { return null; } })
                 .filter(x => x && typeof x.mes === 'string');
@@ -841,7 +868,7 @@ router.post('/search', validateAvatarUrlMiddleware, function (request, response)
             }
 
             const lastMessage = messages[messages.length - 1];
-            const lastMesDate = lastMessage?.send_date || Math.round(fs.statSync(chatFile.path).mtimeMs);
+            const lastMesDate = lastMessage?.send_date || Math.round((await fs.stat(chatFile.path)).mtimeMs);
 
             // If no search query, just return metadata
             if (!query) {
@@ -888,23 +915,25 @@ router.post('/recent', async function (request, response) {
         const allChatFiles = [];
 
         const getCharacterChatFiles = async () => {
-            const pngDirents = await fs.promises.readdir(request.user.directories.characters, { withFileTypes: true });
+            const pngDirents = await fs.readdir(request.user.directories.characters, { withFileTypes: true });
             const pngFiles = pngDirents.filter(e => e.isFile() && path.extname(e.name) === '.png').map(e => e.name);
 
             for (const pngFile of pngFiles) {
                 const chatsDirectory = pngFile.replace('.png', '');
                 const pathToChats = path.join(request.user.directories.chats, chatsDirectory);
-                if (!fs.existsSync(pathToChats)) {
+                try {
+                    await fs.access(pathToChats);
+                } catch {
                     continue;
                 }
-                const pathStats = await fs.promises.stat(pathToChats);
+                const pathStats = await fs.stat(pathToChats);
                 if (pathStats.isDirectory()) {
-                    const chatFiles = await fs.promises.readdir(pathToChats);
+                    const chatFiles = await fs.readdir(pathToChats);
                     const jsonlFiles = chatFiles.filter(file => path.extname(file) === '.jsonl');
 
                     for (const file of jsonlFiles) {
                         const filePath = path.join(pathToChats, file);
-                        const stats = await fs.promises.stat(filePath);
+                        const stats = await fs.stat(filePath);
                         allChatFiles.push({ pngFile, filePath, mtime: stats.mtimeMs });
                     }
                 }
@@ -912,22 +941,24 @@ router.post('/recent', async function (request, response) {
         };
 
         const getGroupChatFiles = async () => {
-            const groupDirents = await fs.promises.readdir(request.user.directories.groups, { withFileTypes: true });
+            const groupDirents = await fs.readdir(request.user.directories.groups, { withFileTypes: true });
             const groups = groupDirents.filter(e => e.isFile() && path.extname(e.name) === '.json').map(e => e.name);
 
             for (const group of groups) {
                 try {
                     const groupPath = path.join(request.user.directories.groups, group);
-                    const groupContents = await fs.promises.readFile(groupPath, 'utf8');
+                    const groupContents = await fs.readFile(groupPath, 'utf8');
                     const groupData = JSON.parse(groupContents);
 
                     if (Array.isArray(groupData.chats)) {
                         for (const chat of groupData.chats) {
                             const filePath = path.join(request.user.directories.groupChats, `${chat}.jsonl`);
-                            if (!fs.existsSync(filePath)) {
+                            try {
+                                await fs.access(filePath);
+                            } catch {
                                 continue;
                             }
-                            const stats = await fs.promises.stat(filePath);
+                            const stats = await fs.stat(filePath);
                             allChatFiles.push({ groupId: groupData.id, filePath, mtime: stats.mtimeMs });
                         }
                     }

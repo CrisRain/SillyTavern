@@ -7,7 +7,7 @@ export const router = Router();
 
 router.post('/list', async (req, res) => {
     try {
-        const key = readSecret(req.user.directories, SECRET_KEYS.AZURE_TTS);
+        const key = await readSecret(req.user.directories, SECRET_KEYS.AZURE_TTS);
 
         if (!key) {
             console.warn('Azure TTS API Key not set');
@@ -45,7 +45,7 @@ router.post('/list', async (req, res) => {
 
 router.post('/generate', async (req, res) => {
     try {
-        const key = readSecret(req.user.directories, SECRET_KEYS.AZURE_TTS);
+        const key = await readSecret(req.user.directories, SECRET_KEYS.AZURE_TTS);
 
         if (!key) {
             console.warn('Azure TTS API Key not set');

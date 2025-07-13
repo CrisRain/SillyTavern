@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import express from 'express';
 import fetch from 'node-fetch';
 
@@ -203,8 +203,8 @@ router.post('/transcribe-audio', async function (request, response) {
 
         console.debug('Transcribing audio with KoboldCpp', server);
 
-        const fileBase64 = fs.readFileSync(request.file.path).toString('base64');
-        fs.unlinkSync(request.file.path);
+        const fileBase64 = (await fs.readFile(request.file.path)).toString('base64');
+        await fs.unlink(request.file.path);
 
         const headers = {};
         setAdditionalHeadersByType(headers, TEXTGEN_TYPES.KOBOLDCPP, server, request.user.directories);

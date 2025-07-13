@@ -1,4 +1,5 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
+import fsWithCallbacks from 'node:fs';
 import { Buffer } from 'node:buffer';
 
 import fetch from 'node-fetch';
@@ -18,60 +19,49 @@ router.post('/caption-image', async (request, response) => {
         let headers = {};
         let bodyParams = {};
 
+        const secretPromises = {};
         if (request.body.api === 'openai' && !request.body.reverse_proxy) {
-            key = readSecret(request.user.directories, SECRET_KEYS.OPENAI);
+            secretPromises.openai = readSecret(request.user.directories, SECRET_KEYS.OPENAI);
         }
-
         if (request.body.api === 'xai' && !request.body.reverse_proxy) {
-            key = readSecret(request.user.directories, SECRET_KEYS.XAI);
+            secretPromises.xai = readSecret(request.user.directories, SECRET_KEYS.XAI);
         }
-
         if (request.body.api === 'mistral' && !request.body.reverse_proxy) {
-            key = readSecret(request.user.directories, SECRET_KEYS.MISTRALAI);
+            secretPromises.mistral = readSecret(request.user.directories, SECRET_KEYS.MISTRALAI);
         }
-
-        if (request.body.reverse_proxy && request.body.proxy_password) {
-            key = request.body.proxy_password;
-        }
-
         if (request.body.api === 'custom') {
-            key = readSecret(request.user.directories, SECRET_KEYS.CUSTOM);
+            secretPromises.custom = readSecret(request.user.directories, SECRET_KEYS.CUSTOM);
             mergeObjectWithYaml(bodyParams, request.body.custom_include_body);
             mergeObjectWithYaml(headers, request.body.custom_include_headers);
         }
-
         if (request.body.api === 'openrouter') {
-            key = readSecret(request.user.directories, SECRET_KEYS.OPENROUTER);
+            secretPromises.openrouter = readSecret(request.user.directories, SECRET_KEYS.OPENROUTER);
         }
-
         if (request.body.api === 'ooba') {
-            key = readSecret(request.user.directories, SECRET_KEYS.OOBA);
+            secretPromises.ooba = readSecret(request.user.directories, SECRET_KEYS.OOBA);
             bodyParams.temperature = 0.1;
         }
-
         if (request.body.api === 'koboldcpp') {
-            key = readSecret(request.user.directories, SECRET_KEYS.KOBOLDCPP);
+            secretPromises.koboldcpp = readSecret(request.user.directories, SECRET_KEYS.KOBOLDCPP);
         }
-
         if (request.body.api === 'llamacpp') {
-            key = readSecret(request.user.directories, SECRET_KEYS.LLAMACPP);
+            secretPromises.llamacpp = readSecret(request.user.directories, SECRET_KEYS.LLAMACPP);
         }
-
         if (request.body.api === 'vllm') {
-            key = readSecret(request.user.directories, SECRET_KEYS.VLLM);
+            secretPromises.vllm = readSecret(request.user.directories, SECRET_KEYS.VLLM);
         }
-
         if (request.body.api === 'zerooneai') {
-            key = readSecret(request.user.directories, SECRET_KEYS.ZEROONEAI);
+            secretPromises.zerooneai = readSecret(request.user.directories, SECRET_KEYS.ZEROONEAI);
         }
-
         if (request.body.api === 'groq') {
-            key = readSecret(request.user.directories, SECRET_KEYS.GROQ);
+            secretPromises.groq = readSecret(request.user.directories, SECRET_KEYS.GROQ);
+        }
+        if (request.body.api === 'cohere') {
+            secretPromises.cohere = readSecret(request.user.directories, SECRET_KEYS.COHERE);
         }
 
-        if (request.body.api === 'cohere') {
-            key = readSecret(request.user.directories, SECRET_KEYS.COHERE);
-        }
+        const secrets = await Promise.all(Object.values(secretPromises));
+        key = secrets.find(s => s) || (request.body.reverse_proxy && request.body.proxy_password);
 
         const noKeyTypes = ['custom', 'ooba', 'koboldcpp', 'vllm', 'llamacpp', 'pollinations'];
         if (!key && !request.body.reverse_proxy && !noKeyTypes.includes(request.body.api)) {
@@ -93,7 +83,7 @@ router.post('/caption-image', async (request, response) => {
             ...bodyParams,
         };
 
-        const captionSystemPrompt = getConfigValue('openai.captionSystemPrompt');
+        const captionSystemPrompt = await getConfigValue('openai.captionSystemPrompt');
         if (captionSystemPrompt) {
             body.messages.unshift({
                 role: 'system',
@@ -207,7 +197,7 @@ router.post('/caption-image', async (request, response) => {
 
 router.post('/transcribe-audio', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.OPENAI);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.OPENAI);
 
         if (!key) {
             console.warn('No OpenAI key found');
@@ -221,7 +211,7 @@ router.post('/transcribe-audio', async (request, response) => {
 
         const formData = new FormData();
         console.info('Processing audio file', request.file.path);
-        formData.append('file', fs.createReadStream(request.file.path), { filename: 'audio.wav', contentType: 'audio/wav' });
+        formData.append('file', fsWithCallbacks.createReadStream(request.file.path), { filename: 'audio.wav', contentType: 'audio/wav' });
         formData.append('model', request.body.model);
 
         if (request.body.language) {
@@ -243,7 +233,7 @@ router.post('/transcribe-audio', async (request, response) => {
             return response.status(500).send(text);
         }
 
-        fs.unlinkSync(request.file.path);
+        await fs.unlink(request.file.path);
         const data = await result.json();
         console.debug('OpenAI transcription response', data);
         return response.json(data);
@@ -255,7 +245,7 @@ router.post('/transcribe-audio', async (request, response) => {
 
 router.post('/generate-voice', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.OPENAI);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.OPENAI);
 
         if (!key) {
             console.warn('No OpenAI key found');
@@ -294,7 +284,7 @@ router.post('/generate-voice', async (request, response) => {
 
 router.post('/generate-image', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.OPENAI);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.OPENAI);
 
         if (!key) {
             console.warn('No OpenAI key found');
@@ -330,7 +320,7 @@ const custom = express.Router();
 
 custom.post('/generate-voice', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.CUSTOM_OPENAI_TTS);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.CUSTOM_OPENAI_TTS);
         const { input, provider_endpoint, response_format, voice, speed, model } = request.body;
 
         if (!provider_endpoint) {

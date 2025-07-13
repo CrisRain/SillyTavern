@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import yaml from 'yaml';
 import color from 'chalk';
@@ -125,10 +125,12 @@ function getAllKeys(obj, prefix = '') {
  * Compares the current config.yaml with the default config.yaml and adds any missing values.
  * @param {string} configPath Path to config.yaml
  */
-export function addMissingConfigValues(configPath) {
+export async function addMissingConfigValues(configPath) {
     try {
-        const defaultConfig = yaml.parse(fs.readFileSync(path.join(serverDirectory, './default/config.yaml'), 'utf8'));
-        let config = yaml.parse(fs.readFileSync(configPath, 'utf8'));
+        const defaultConfigContent = await fs.readFile(path.join(serverDirectory, './default/config.yaml'), 'utf8');
+        const configContent = await fs.readFile(configPath, 'utf8');
+        const defaultConfig = yaml.parse(defaultConfigContent);
+        let config = yaml.parse(configContent);
 
         // Migrate old keys to new keys
         const migratedKeys = [];
@@ -181,7 +183,7 @@ export function addMissingConfigValues(configPath) {
             console.log('Migrating config values in config.yaml:', migratedKeys);
         }
 
-        fs.writeFileSync(configPath, yaml.stringify(config));
+        await fs.writeFile(configPath, yaml.stringify(config));
     } catch (error) {
         console.error(color.red('FATAL: Could not add missing config values to config.yaml'), error);
     }
@@ -191,7 +193,7 @@ export function addMissingConfigValues(configPath) {
  * Performs early initialization tasks before the server starts.
  * @param {string} configPath Path to config.yaml
  */
-export function initConfig(configPath) {
+export async function initConfig(configPath) {
     setConfigFilePath(configPath);
-    addMissingConfigValues(configPath);
+    await addMissingConfigValues(configPath);
 }

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import process from 'node:process';
 import dns from 'node:dns';
 import Handlebars from 'handlebars';
@@ -7,22 +7,13 @@ import ipMatching from 'ip-matching';
 import isDocker from 'is-docker';
 
 import { getIpFromRequest } from '../express-common.js';
-import { color, getConfigValue, safeReadFileSync } from '../util.js';
+import { color, getConfigValue, safeReadFile } from '../util.js';
 
 const whitelistPath = path.join(process.cwd(), './whitelist.txt');
 const enableForwardedWhitelist = !!getConfigValue('enableForwardedWhitelist', false, 'boolean');
 const whitelistDockerHosts = !!getConfigValue('whitelistDockerHosts', true, 'boolean');
 /** @type {string[]} */
-let whitelist = getConfigValue('whitelist', []);
-
-if (fs.existsSync(whitelistPath)) {
-    try {
-        let whitelistTxt = fs.readFileSync(whitelistPath, 'utf-8');
-        whitelist = whitelistTxt.split('\n').filter(ip => ip).map(ip => ip.trim());
-    } catch (e) {
-        // Ignore errors that may occur when reading the whitelist (e.g. permissions)
-    }
-}
+let whitelist;
 
 /**
  * Get the client IP address from the request headers.
@@ -76,8 +67,16 @@ async function addDockerHostsToWhitelist() {
  * @returns {Promise<import('express').RequestHandler>} Promise that resolves to the middleware function
  */
 export default async function getWhitelistMiddleware() {
+    whitelist = await getConfigValue('whitelist', []);
+    try {
+        await fs.access(whitelistPath);
+        let whitelistTxt = await fs.readFile(whitelistPath, 'utf-8');
+        whitelist = whitelistTxt.split('\n').filter(ip => ip).map(ip => ip.trim());
+    } catch (e) {
+        // Ignore errors that may occur when reading the whitelist (e.g. permissions)
+    }
     const forbiddenWebpage = Handlebars.compile(
-        safeReadFileSync('./public/error/forbidden-by-whitelist.html') ?? '',
+        await safeReadFile('./public/error/forbidden-by-whitelist.html') ?? '',
     );
 
     const noLogPaths = [
@@ -93,7 +92,7 @@ export default async function getWhitelistMiddleware() {
 
         //clientIp = req.connection.remoteAddress.split(':').pop();
         if (!whitelist.some(x => ipMatching.matches(clientIp, ipMatching.getMatch(x)))
-            || forwardedIp && !whitelist.some(x => ipMatching.matches(forwardedIp, ipMatching.getMatch(x)))
+            && forwardedIp && !whitelist.some(x => ipMatching.matches(forwardedIp, ipMatching.getMatch(x)))
         ) {
             // Log the connection attempt with real IP address
             const ipDetails = forwardedIp

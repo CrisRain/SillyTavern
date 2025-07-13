@@ -1,24 +1,18 @@
-import fs from 'node:fs';
-import { promises as fsPromises } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import mime from 'mime-types';
 import express from 'express';
 import sanitize from 'sanitize-filename';
 import { Jimp, JimpMime } from '../jimp.js';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 
 import { getConfigValue } from '../util.js';
 
-const thumbnailsEnabled = !!getConfigValue('thumbnails.enabled', true, 'boolean');
-const quality = Math.min(100, Math.max(1, parseInt(getConfigValue('thumbnails.quality', 95, 'number'))));
-const pngFormat = String(getConfigValue('thumbnails.format', 'jpg')).toLowerCase().trim() === 'png';
-
-/** @type {Record<string, number[]>} */
-const dimensions = {
-    'bg': getConfigValue('thumbnails.dimensions.bg', [160, 90]),
-    'avatar': getConfigValue('thumbnails.dimensions.avatar', [96, 144]),
-};
+let thumbnailsEnabled;
+let quality;
+let pngFormat;
+let dimensions;
 
 /**
  * Gets a path to thumbnail folder based on the type.
@@ -68,14 +62,17 @@ function getOriginalFolder(directories, type) {
  * @param {'bg' | 'avatar'} type Type of the thumbnail
  * @param {string} file Name of the file
  */
-export function invalidateThumbnail(directories, type, file) {
+export async function invalidateThumbnail(directories, type, file) {
     const folder = getThumbnailFolder(directories, type);
     if (folder === undefined) throw new Error('Invalid thumbnail type');
 
     const pathToThumbnail = path.join(folder, file);
 
-    if (fs.existsSync(pathToThumbnail)) {
-        fs.unlinkSync(pathToThumbnail);
+    try {
+        await fs.access(pathToThumbnail);
+        await fs.unlink(pathToThumbnail);
+    } catch {
+        // ignore
     }
 }
 
@@ -93,15 +90,28 @@ async function generateThumbnail(directories, type, file) {
     const pathToCachedFile = path.join(thumbnailFolder, file);
     const pathToOriginalFile = path.join(originalFolder, file);
 
-    const cachedFileExists = fs.existsSync(pathToCachedFile);
-    const originalFileExists = fs.existsSync(pathToOriginalFile);
+    let cachedFileExists = false;
+    try {
+        await fs.access(pathToCachedFile);
+        cachedFileExists = true;
+    } catch {
+        // ignore
+    }
+
+    let originalFileExists = false;
+    try {
+        await fs.access(pathToOriginalFile);
+        originalFileExists = true;
+    } catch {
+        // ignore
+    }
 
     // to handle cases when original image was updated after thumb creation
     let shouldRegenerate = false;
 
     if (cachedFileExists && originalFileExists) {
-        const originalStat = fs.statSync(pathToOriginalFile);
-        const cachedStat = fs.statSync(pathToCachedFile);
+        const originalStat = await fs.stat(pathToOriginalFile);
+        const cachedStat = await fs.stat(pathToCachedFile);
 
         if (originalStat.mtimeMs > cachedStat.ctimeMs) {
             //console.warn('Original file changed. Regenerating thumbnail...');
@@ -121,6 +131,18 @@ async function generateThumbnail(directories, type, file) {
         let buffer;
 
         try {
+            const [qualityValue, formatValue, bgDimensions, avatarDimensions] = await Promise.all([
+                getConfigValue('thumbnails.quality', 95, 'number'),
+                getConfigValue('thumbnails.format', 'jpg'),
+                getConfigValue('thumbnails.dimensions.bg', [160, 90]),
+                getConfigValue('thumbnails.dimensions.avatar', [96, 144]),
+            ]);
+            quality = Math.min(100, Math.max(1, parseInt(qualityValue)));
+            pngFormat = String(formatValue).toLowerCase().trim() === 'png';
+            dimensions = {
+                'bg': bgDimensions,
+                'avatar': avatarDimensions,
+            };
             const size = dimensions[type];
             const image = await Jimp.read(pathToOriginalFile);
             const width = !isNaN(size?.[0]) && size?.[0] > 0 ? size[0] : image.bitmap.width;
@@ -132,10 +154,10 @@ async function generateThumbnail(directories, type, file) {
         }
         catch (inner) {
             console.warn(`Thumbnailer can not process the image: ${pathToOriginalFile}. Using original size`, inner);
-            buffer = fs.readFileSync(pathToOriginalFile);
+            buffer = await fs.readFile(pathToOriginalFile);
         }
 
-        writeFileAtomicSync(pathToCachedFile, buffer);
+        await writeFileAtomic(pathToCachedFile, buffer);
     }
     catch (outer) {
         return null;
@@ -151,7 +173,7 @@ async function generateThumbnail(directories, type, file) {
  */
 export async function ensureThumbnailCache(directoriesList) {
     for (const directories of directoriesList) {
-        const cacheFiles = fs.readdirSync(directories.thumbnailsBg);
+        const cacheFiles = await fs.readdir(directories.thumbnailsBg);
 
         // files exist, all ok
         if (cacheFiles.length) {
@@ -160,7 +182,7 @@ export async function ensureThumbnailCache(directoriesList) {
 
         console.info('Generating thumbnails cache. Please wait...');
 
-        const bgFiles = fs.readdirSync(directories.backgrounds);
+        const bgFiles = await fs.readdir(directories.backgrounds);
         const tasks = [];
 
         for (const file of bgFiles) {
@@ -196,7 +218,7 @@ router.get('/', async function (request, response) {
             console.error('Malicious filename prevented');
             return response.sendStatus(403);
         }
-
+        thumbnailsEnabled = !!await getConfigValue('thumbnails.enabled', true, 'boolean');
         if (!thumbnailsEnabled) {
             const folder = getOriginalFolder(request.user.directories, type);
 
@@ -205,11 +227,13 @@ router.get('/', async function (request, response) {
             }
 
             const pathToOriginalFile = path.join(folder, file);
-            if (!fs.existsSync(pathToOriginalFile)) {
+            try {
+                await fs.access(pathToOriginalFile);
+            } catch {
                 return response.sendStatus(404);
             }
             const contentType = mime.lookup(pathToOriginalFile) || 'image/png';
-            const originalFile = await fsPromises.readFile(pathToOriginalFile);
+            const originalFile = await fs.readFile(pathToOriginalFile);
             response.setHeader('Content-Type', contentType);
             return response.send(originalFile);
         }
@@ -220,12 +244,14 @@ router.get('/', async function (request, response) {
             return response.sendStatus(404);
         }
 
-        if (!fs.existsSync(pathToCachedFile)) {
+        try {
+            await fs.access(pathToCachedFile);
+        } catch {
             return response.sendStatus(404);
         }
 
         const contentType = mime.lookup(pathToCachedFile) || 'image/jpeg';
-        const cachedFile = await fsPromises.readFile(pathToCachedFile);
+        const cachedFile = await fs.readFile(pathToCachedFile);
         response.setHeader('Content-Type', contentType);
         return response.send(cachedFile);
     } catch (error) {

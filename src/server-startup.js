@@ -1,6 +1,6 @@
 import https from 'node:https';
 import http from 'node:http';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { color, urlHostnameToIPv6, getHasIP } from './util.js';
 
 // Express routers
@@ -200,9 +200,9 @@ export class ServerStartup {
 
     /**
      * Checks if SSL options are valid. If not, it will print an error message and exit the process.
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    #verifySslOptions() {
+    async #verifySslOptions() {
         if (!this.cliArgs.ssl) return;
 
         if (!this.cliArgs.certPath) {
@@ -213,11 +213,15 @@ export class ServerStartup {
             this.#fatal('Error: SSL key path is required when using HTTPS. Check your config');
         }
 
-        if (!fs.existsSync(this.cliArgs.certPath)) {
+        try {
+            await fs.access(this.cliArgs.certPath);
+        } catch {
             this.#fatal('Error: SSL certificate path does not exist');
         }
 
-        if (!fs.existsSync(this.cliArgs.keyPath)) {
+        try {
+            await fs.access(this.cliArgs.keyPath);
+        } catch {
             this.#fatal('Error: SSL key path does not exist');
         }
     }
@@ -228,12 +232,12 @@ export class ServerStartup {
      * @param {number} ipVersion the ip version to use
      * @returns {Promise<void>} A promise that resolves when the server is listening
      */
-    #createHttpsServer(url, ipVersion) {
-        this.#verifySslOptions();
-        return new Promise((resolve, reject) => {
+    async #createHttpsServer(url, ipVersion) {
+        await this.#verifySslOptions();
+        return new Promise(async (resolve, reject) => {
             const sslOptions = {
-                cert: fs.readFileSync(this.cliArgs.certPath),
-                key: fs.readFileSync(this.cliArgs.keyPath),
+                cert: await fs.readFile(this.cliArgs.certPath),
+                key: await fs.readFile(this.cliArgs.keyPath),
             };
             const server = https.createServer(sslOptions, this.app);
             server.on('error', reject);

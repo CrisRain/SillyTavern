@@ -1,5 +1,5 @@
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 
 import express from 'express';
 import sanitize from 'sanitize-filename';
@@ -16,11 +16,13 @@ async function getManifest(extensionPath) {
     const manifestPath = path.join(extensionPath, 'manifest.json');
 
     // Check if manifest.json exists
-    if (!fs.existsSync(manifestPath)) {
+    try {
+        await fs.access(manifestPath);
+    } catch {
         throw new Error(`Manifest file not found at ${manifestPath}`);
     }
 
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
     return manifest;
 }
 
@@ -74,12 +76,16 @@ router.post('/install', async (request, response) => {
         const git = simpleGit();
 
         // make sure the third-party directory exists
-        if (!fs.existsSync(path.join(request.user.directories.extensions))) {
-            fs.mkdirSync(path.join(request.user.directories.extensions));
+        try {
+            await fs.access(path.join(request.user.directories.extensions));
+        } catch {
+            await fs.mkdir(path.join(request.user.directories.extensions));
         }
 
-        if (!fs.existsSync(PUBLIC_DIRECTORIES.globalExtensions)) {
-            fs.mkdirSync(PUBLIC_DIRECTORIES.globalExtensions);
+        try {
+            await fs.access(PUBLIC_DIRECTORIES.globalExtensions);
+        } catch {
+            await fs.mkdir(PUBLIC_DIRECTORIES.globalExtensions);
         }
 
         const { url, global, branch } = request.body;
@@ -92,8 +98,11 @@ router.post('/install', async (request, response) => {
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
         const extensionPath = path.join(basePath, sanitize(path.basename(url, '.git')));
 
-        if (fs.existsSync(extensionPath)) {
+        try {
+            await fs.access(extensionPath);
             return response.status(409).send(`Directory already exists at ${extensionPath}`);
+        } catch {
+            // ignore
         }
 
         const cloneOptions = { '--depth': 1 };
@@ -139,7 +148,9 @@ router.post('/update', async (request, response) => {
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
         const extensionPath = path.join(basePath, sanitize(extensionName));
 
-        if (!fs.existsSync(extensionPath)) {
+        try {
+            await fs.access(extensionPath);
+        } catch {
             return response.status(404).send(`Directory does not exist at ${extensionPath}`);
         }
 
@@ -180,7 +191,9 @@ router.post('/branches', async (request, response) => {
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
         const extensionPath = path.join(basePath, sanitize(extensionName));
 
-        if (!fs.existsSync(extensionPath)) {
+        try {
+            await fs.access(extensionPath);
+        } catch {
             return response.status(404).send(`Directory does not exist at ${extensionPath}`);
         }
 
@@ -225,7 +238,9 @@ router.post('/switch', async (request, response) => {
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
         const extensionPath = path.join(basePath, sanitize(extensionName));
 
-        if (!fs.existsSync(extensionPath)) {
+        try {
+            await fs.access(extensionPath);
+        } catch {
             return response.status(404).send(`Directory does not exist at ${extensionPath}`);
         }
 
@@ -286,14 +301,24 @@ router.post('/move', async (request, response) => {
         const sourcePath = path.join(sourceDirectory, sanitize(extensionName));
         const destinationPath = path.join(destinationDirectory, sanitize(extensionName));
 
-        if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isDirectory()) {
+        try {
+            await fs.access(sourcePath);
+            const stats = await fs.stat(sourcePath);
+            if (!stats.isDirectory()) {
+                console.error(`Source is not a directory at ${sourcePath}`);
+                return response.status(404).send('Source is not a directory.');
+            }
+        } catch {
             console.error(`Source directory does not exist at ${sourcePath}`);
             return response.status(404).send('Source directory does not exist.');
         }
 
-        if (fs.existsSync(destinationPath)) {
+        try {
+            await fs.access(destinationPath);
             console.error(`Destination directory already exists at ${destinationPath}`);
             return response.status(409).send('Destination directory already exists.');
+        } catch {
+            // ignore
         }
 
         if (source === destination) {
@@ -301,8 +326,8 @@ router.post('/move', async (request, response) => {
             return response.status(409).send('Source and destination directories are the same.');
         }
 
-        fs.cpSync(sourcePath, destinationPath, { recursive: true, force: true });
-        fs.rmSync(sourcePath, { recursive: true, force: true });
+        await fs.cp(sourcePath, destinationPath, { recursive: true, force: true });
+        await fs.rm(sourcePath, { recursive: true, force: true });
         console.info(`Extension has been moved from ${sourcePath} to ${destinationPath}`);
 
         return response.sendStatus(204);
@@ -332,7 +357,9 @@ router.post('/version', async (request, response) => {
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
         const extensionPath = path.join(basePath, sanitize(extensionName));
 
-        if (!fs.existsSync(extensionPath)) {
+        try {
+            await fs.access(extensionPath);
+        } catch {
             return response.status(404).send(`Directory does not exist at ${extensionPath}`);
         }
 
@@ -385,11 +412,13 @@ router.post('/delete', async (request, response) => {
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
         const extensionPath = path.join(basePath, sanitize(extensionName));
 
-        if (!fs.existsSync(extensionPath)) {
+        try {
+            await fs.access(extensionPath);
+        } catch {
             return response.status(404).send(`Directory does not exist at ${extensionPath}`);
         }
 
-        await fs.promises.rm(extensionPath, { recursive: true });
+        await fs.rm(extensionPath, { recursive: true });
         console.info(`Extension has been deleted at ${extensionPath}`);
 
         return response.send(`Extension has been deleted at ${extensionPath}`);
@@ -404,34 +433,35 @@ router.post('/delete', async (request, response) => {
  * Discover the extension folders
  * If the folder is called third-party, search for subfolders instead
  */
-router.get('/discover', function (request, response) {
-    if (!fs.existsSync(path.join(request.user.directories.extensions))) {
-        fs.mkdirSync(path.join(request.user.directories.extensions));
+router.get('/discover', async function (request, response) {
+    try {
+        await fs.access(path.join(request.user.directories.extensions));
+    } catch {
+        await fs.mkdir(path.join(request.user.directories.extensions));
     }
 
-    if (!fs.existsSync(PUBLIC_DIRECTORIES.globalExtensions)) {
-        fs.mkdirSync(PUBLIC_DIRECTORIES.globalExtensions);
+    try {
+        await fs.access(PUBLIC_DIRECTORIES.globalExtensions);
+    } catch {
+        await fs.mkdir(PUBLIC_DIRECTORIES.globalExtensions);
     }
 
     // Get all folders in system extensions folder, excluding third-party
-    const builtInExtensions = fs
-        .readdirSync(PUBLIC_DIRECTORIES.extensions)
-        .filter(f => fs.statSync(path.join(PUBLIC_DIRECTORIES.extensions, f)).isDirectory())
-        .filter(f => f !== 'third-party')
-        .map(f => ({ type: 'system', name: f }));
+    const builtInExtensions = (await fs.readdir(PUBLIC_DIRECTORIES.extensions, { withFileTypes: true }))
+        .filter(dirent => dirent.isDirectory())
+        .filter(dirent => dirent.name !== 'third-party')
+        .map(dirent => ({ type: 'system', name: dirent.name }));
 
     // Get all folders in local extensions folder
-    const userExtensions = fs
-        .readdirSync(path.join(request.user.directories.extensions))
-        .filter(f => fs.statSync(path.join(request.user.directories.extensions, f)).isDirectory())
-        .map(f => ({ type: 'local', name: `third-party/${f}` }));
+    const userExtensions = (await fs.readdir(path.join(request.user.directories.extensions), { withFileTypes: true }))
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => ({ type: 'local', name: `third-party/${dirent.name}` }));
 
     // Get all folders in global extensions folder
     // In case of a conflict, the extension will be loaded from the user folder
-    const globalExtensions = fs
-        .readdirSync(PUBLIC_DIRECTORIES.globalExtensions)
-        .filter(f => fs.statSync(path.join(PUBLIC_DIRECTORIES.globalExtensions, f)).isDirectory())
-        .map(f => ({ type: 'global', name: `third-party/${f}` }))
+    const globalExtensions = (await fs.readdir(PUBLIC_DIRECTORIES.globalExtensions, { withFileTypes: true }))
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => ({ type: 'global', name: `third-party/${dirent.name}` }))
         .filter(f => !userExtensions.some(e => e.name === f.name));
 
     // Combine all extensions

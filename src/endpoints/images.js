@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
 
@@ -13,13 +13,15 @@ import { clientRelativePath, removeFileExtension, getImages } from '../util.js';
  *
  * @param {string} filePath - The full path of the file for which the directory should be ensured.
  */
-function ensureDirectoryExistence(filePath) {
+async function ensureDirectoryExistence(filePath) {
     const dirname = path.dirname(filePath);
-    if (fs.existsSync(dirname)) {
+    try {
+        await fs.access(dirname);
         return true;
+    } catch {
+        await ensureDirectoryExistence(dirname);
+        await fs.mkdir(dirname);
     }
-    ensureDirectoryExistence(dirname);
-    fs.mkdirSync(dirname);
 }
 
 export const router = express.Router();
@@ -65,9 +67,9 @@ router.post('/upload', async (request, response) => {
             pathToNewFile = path.join(request.user.directories.userImages, sanitize(request.body.ch_name), sanitize(filename));
         }
 
-        ensureDirectoryExistence(pathToNewFile);
+        await ensureDirectoryExistence(pathToNewFile);
         const imageBuffer = Buffer.from(base64Data, 'base64');
-        await fs.promises.writeFile(pathToNewFile, new Uint8Array(imageBuffer));
+        await fs.writeFile(pathToNewFile, new Uint8Array(imageBuffer));
         response.send({ path: clientRelativePath(request.user.directories.root, pathToNewFile) });
     } catch (error) {
         console.error(error);
@@ -75,7 +77,7 @@ router.post('/upload', async (request, response) => {
     }
 });
 
-router.post('/list/:folder?', (request, response) => {
+router.post('/list/:folder?', async (request, response) => {
     try {
         if (request.params.folder) {
             if (request.body.folder) {
@@ -94,11 +96,13 @@ router.post('/list/:folder?', (request, response) => {
         const sort = request.body.sortField || 'date';
         const order = request.body.sortOrder || 'asc';
 
-        if (!fs.existsSync(directoryPath)) {
-            fs.mkdirSync(directoryPath, { recursive: true });
+        try {
+            await fs.access(directoryPath);
+        } catch {
+            await fs.mkdir(directoryPath, { recursive: true });
         }
 
-        const images = getImages(directoryPath, sort);
+        const images = await getImages(directoryPath, sort);
         if (order === 'desc') {
             images.reverse();
         }
@@ -109,14 +113,16 @@ router.post('/list/:folder?', (request, response) => {
     }
 });
 
-router.post('/folders', (request, response) => {
+router.post('/folders', async (request, response) => {
     try {
         const directoryPath = request.user.directories.userImages;
-        if (!fs.existsSync(directoryPath)) {
-            fs.mkdirSync(directoryPath, { recursive: true });
+        try {
+            await fs.access(directoryPath);
+        } catch {
+            await fs.mkdir(directoryPath, { recursive: true });
         }
 
-        const folders = fs.readdirSync(directoryPath, { withFileTypes: true })
+        const folders = (await fs.readdir(directoryPath, { withFileTypes: true }))
             .filter(dirent => dirent.isDirectory())
             .map(dirent => dirent.name);
 

@@ -86,9 +86,9 @@ export class CommandLineParser {
      * Parses command line arguments.
      * Arguments that are not provided will be filled with config values.
      * @param {string[]} args Process startup arguments.
-     * @returns {CommandLineArguments} Parsed command line arguments.
+     * @returns {Promise<CommandLineArguments>} Parsed command line arguments.
      */
-    parse(args) {
+    async parse(args) {
         const cliArguments = yargs(hideBin(args))
             .usage('Usage: <your-start-script> [options]\nOptions that are not provided will be filled with config values.')
             .option('configPath', {
@@ -190,28 +190,28 @@ export class CommandLineParser {
         /** @type {CommandLineArguments} */
         const result = {
             configPath: configPath,
-            dataRoot: cliArguments.dataRoot ?? getConfigValue('dataRoot', this.default.dataRoot),
-            port: cliArguments.port ?? getConfigValue('port', this.default.port, 'number'),
-            listen: cliArguments.listen ?? getConfigValue('listen', this.default.listen, 'boolean'),
-            listenAddressIPv6: cliArguments.listenAddressIPv6 ?? getConfigValue('listenAddress.ipv6', this.default.listenAddressIPv6),
-            listenAddressIPv4: cliArguments.listenAddressIPv4 ?? getConfigValue('listenAddress.ipv4', this.default.listenAddressIPv4),
-            enableIPv4: stringToBool(cliArguments.enableIPv4) ?? stringToBool(getConfigValue('protocol.ipv4', this.default.enableIPv4)) ?? this.default.enableIPv4,
-            enableIPv6: stringToBool(cliArguments.enableIPv6) ?? stringToBool(getConfigValue('protocol.ipv6', this.default.enableIPv6)) ?? this.default.enableIPv6,
-            dnsPreferIPv6: cliArguments.dnsPreferIPv6 ?? getConfigValue('dnsPreferIPv6', this.default.dnsPreferIPv6, 'boolean'),
-            autorun: cliArguments.autorun ?? getConfigValue('autorun', this.default.autorun, 'boolean'),
-            autorunHostname: cliArguments.autorunHostname ?? getConfigValue('autorunHostname', this.default.autorunHostname),
-            autorunPortOverride: cliArguments.autorunPortOverride ?? getConfigValue('autorunPortOverride', this.default.autorunPortOverride, 'number'),
-            enableCorsProxy: cliArguments.corsProxy ?? getConfigValue('enableCorsProxy', this.default.enableCorsProxy, 'boolean'),
-            disableCsrf: cliArguments.disableCsrf ?? getConfigValue('disableCsrfProtection', this.default.disableCsrf, 'boolean'),
-            ssl: cliArguments.ssl ?? getConfigValue('ssl.enabled', this.default.ssl, 'boolean'),
-            certPath: cliArguments.certPath ?? getConfigValue('ssl.certPath', this.default.certPath),
-            keyPath: cliArguments.keyPath ?? getConfigValue('ssl.keyPath', this.default.keyPath),
-            whitelistMode: cliArguments.whitelist ?? getConfigValue('whitelistMode', this.default.whitelistMode, 'boolean'),
-            avoidLocalhost: cliArguments.avoidLocalhost ?? getConfigValue('avoidLocalhost', this.default.avoidLocalhost, 'boolean'),
-            basicAuthMode: cliArguments.basicAuthMode ?? getConfigValue('basicAuthMode', this.default.basicAuthMode, 'boolean'),
-            requestProxyEnabled: cliArguments.requestProxyEnabled ?? getConfigValue('requestProxy.enabled', this.default.requestProxyEnabled, 'boolean'),
-            requestProxyUrl: cliArguments.requestProxyUrl ?? getConfigValue('requestProxy.url', this.default.requestProxyUrl),
-            requestProxyBypass: cliArguments.requestProxyBypass ?? getConfigValue('requestProxy.bypass', this.default.requestProxyBypass),
+            dataRoot: cliArguments.dataRoot ?? await getConfigValue('dataRoot', this.default.dataRoot),
+            port: cliArguments.port ?? await getConfigValue('port', this.default.port, 'number'),
+            listen: cliArguments.listen ?? await getConfigValue('listen', this.default.listen, 'boolean'),
+            listenAddressIPv6: cliArguments.listenAddressIPv6 ?? await getConfigValue('listenAddress.ipv6', this.default.listenAddressIPv6),
+            listenAddressIPv4: cliArguments.listenAddressIPv4 ?? await getConfigValue('listenAddress.ipv4', this.default.listenAddressIPv4),
+            enableIPv4: stringToBool(cliArguments.enableIPv4) ?? stringToBool(await getConfigValue('protocol.ipv4', this.default.enableIPv4)) ?? this.default.enableIPv4,
+            enableIPv6: stringToBool(cliArguments.enableIPv6) ?? stringToBool(await getConfigValue('protocol.ipv6', this.default.enableIPv6)) ?? this.default.enableIPv6,
+            dnsPreferIPv6: cliArguments.dnsPreferIPv6 ?? await getConfigValue('dnsPreferIPv6', this.default.dnsPreferIPv6, 'boolean'),
+            autorun: cliArguments.autorun ?? await getConfigValue('autorun', this.default.autorun, 'boolean'),
+            autorunHostname: cliArguments.autorunHostname ?? await getConfigValue('autorunHostname', this.default.autorunHostname),
+            autorunPortOverride: cliArguments.autorunPortOverride ?? await getConfigValue('autorunPortOverride', this.default.autorunPortOverride, 'number'),
+            enableCorsProxy: cliArguments.corsProxy ?? await getConfigValue('enableCorsProxy', this.default.enableCorsProxy, 'boolean'),
+            disableCsrf: cliArguments.disableCsrf ?? await getConfigValue('disableCsrfProtection', this.default.disableCsrf, 'boolean'),
+            ssl: cliArguments.ssl ?? await getConfigValue('ssl.enabled', this.default.ssl, 'boolean'),
+            certPath: cliArguments.certPath ?? await getConfigValue('ssl.certPath', this.default.certPath),
+            keyPath: cliArguments.keyPath ?? await getConfigValue('ssl.keyPath', this.default.keyPath),
+            whitelistMode: cliArguments.whitelist ?? await getConfigValue('whitelistMode', this.default.whitelistMode, 'boolean'),
+            avoidLocalhost: cliArguments.avoidLocalhost ?? await getConfigValue('avoidLocalhost', this.default.avoidLocalhost, 'boolean'),
+            basicAuthMode: cliArguments.basicAuthMode ?? await getConfigValue('basicAuthMode', this.default.basicAuthMode, 'boolean'),
+            requestProxyEnabled: cliArguments.requestProxyEnabled ?? await getConfigValue('requestProxy.enabled', this.default.requestProxyEnabled, 'boolean'),
+            requestProxyUrl: cliArguments.requestProxyUrl ?? await getConfigValue('requestProxy.url', this.default.requestProxyUrl),
+            requestProxyBypass: cliArguments.requestProxyBypass ?? await getConfigValue('requestProxy.bypass', this.default.requestProxyBypass),
             getIPv4ListenUrl: function () {
                 const isValid = ipRegex.v4({ exact: true }).test(this.listenAddressIPv4);
                 return new URL(

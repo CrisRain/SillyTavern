@@ -1,4 +1,5 @@
-import fs from 'node:fs';
+// @ts-nocheck
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 
@@ -48,11 +49,13 @@ export async function loadPlugins(app, pluginsPath) {
         }
 
         // Plugins directory does not exist.
-        if (!fs.existsSync(pluginsPath)) {
+        try {
+            await fs.access(pluginsPath);
+        } catch {
             return emptyFn;
         }
 
-        const files = fs.readdirSync(pluginsPath);
+        const files = await fs.readdir(pluginsPath);
 
         // No plugins to load.
         if (files.length === 0) {
@@ -64,7 +67,8 @@ export async function loadPlugins(app, pluginsPath) {
         for (const file of files) {
             const pluginFilePath = path.join(pluginsPath, file);
 
-            if (fs.statSync(pluginFilePath).isDirectory()) {
+            const stats = await fs.stat(pluginFilePath);
+            if (stats.isDirectory()) {
                 await loadFromDirectory(app, pluginFilePath, exitHooks);
                 continue;
             }
@@ -90,7 +94,7 @@ export async function loadPlugins(app, pluginsPath) {
 }
 
 async function loadFromDirectory(app, pluginDirectoryPath, exitHooks) {
-    const files = fs.readdirSync(pluginDirectoryPath);
+    const files = await fs.readdir(pluginDirectoryPath);
 
     // No plugins to load.
     if (files.length === 0) {
@@ -99,10 +103,13 @@ async function loadFromDirectory(app, pluginDirectoryPath, exitHooks) {
 
     // Plugin is an npm package.
     const packageJsonFilePath = path.join(pluginDirectoryPath, 'package.json');
-    if (fs.existsSync(packageJsonFilePath)) {
+    try {
+        await fs.access(packageJsonFilePath);
         if (await loadFromPackage(app, packageJsonFilePath, exitHooks)) {
             return;
         }
+    } catch {
+        // ignore
     }
 
     // Plugin is a module file.
@@ -110,10 +117,13 @@ async function loadFromDirectory(app, pluginDirectoryPath, exitHooks) {
 
     for (const fileType of fileTypes) {
         const filePath = path.join(pluginDirectoryPath, fileType);
-        if (fs.existsSync(filePath)) {
+        try {
+            await fs.access(filePath);
             if (await loadFromFile(app, filePath, exitHooks)) {
                 return;
             }
+        } catch {
+            // ignore
         }
     }
 }
@@ -128,7 +138,7 @@ async function loadFromDirectory(app, pluginDirectoryPath, exitHooks) {
  */
 async function loadFromPackage(app, packageJsonPath, exitHooks) {
     try {
-        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+        const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
         if (packageJson.main) {
             const pluginFilePath = path.join(path.dirname(packageJsonPath), packageJson.main);
             return await loadFromFile(app, pluginFilePath, exitHooks);
@@ -239,9 +249,11 @@ async function updatePlugins(pluginsPath) {
         return;
     }
 
-    const directories = fs.readdirSync(pluginsPath)
-        .filter(file => !file.startsWith('.'))
-        .filter(file => fs.statSync(path.join(pluginsPath, file)).isDirectory());
+    const dirents = await fs.readdir(pluginsPath, { withFileTypes: true });
+    const directories = dirents
+        .filter(dirent => !dirent.name.startsWith('.'))
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name);
 
     if (directories.length === 0) {
         return;

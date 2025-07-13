@@ -1,5 +1,5 @@
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import http2 from 'node:http2';
 import process from 'node:process';
 import { Readable } from 'node:stream';
@@ -46,9 +46,9 @@ export function setConfigFilePath(configFilePath) {
 
 /**
  * Returns the config object from the config.yaml file.
- * @returns {object} Config object
+ * @returns {Promise<any>} Config object
  */
-export function getConfig() {
+export async function getConfig() {
     if (CONFIG_PATH === null) {
         console.trace();
         console.error(color.red('No config file path set. Please set the config file path using setConfigFilePath().'));
@@ -57,14 +57,16 @@ export function getConfig() {
     if (CACHED_CONFIG) {
         return CACHED_CONFIG;
     }
-    if (!fs.existsSync(CONFIG_PATH)) {
+    try {
+        await fs.access(CONFIG_PATH);
+    } catch {
         console.error(color.red('No config file found. Please create a config.yaml file. The default config file can be found in the /default folder.'));
         console.error(color.red('The program will now exit.'));
         process.exit(1);
     }
 
     try {
-        const config = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+        const config = yaml.parse(await fs.readFile(CONFIG_PATH, 'utf8'));
         CACHED_CONFIG = config;
         return config;
     } catch (error) {
@@ -79,21 +81,21 @@ export function getConfig() {
  * @param {string} key - Key to get from the config object
  * @param {any} defaultValue - Default value to return if the key is not found
  * @param {'number'|'boolean'|null} typeConverter - Type to convert the value to
- * @returns {any} Value for the given key
+ * @returns {Promise<any>} Value for the given key
  */
-export function getConfigValue(key, defaultValue = null, typeConverter = null) {
-    function _getValue() {
+export async function getConfigValue(key, defaultValue = null, typeConverter = null) {
+    async function _getValue() {
         const envKey = keyToEnv(key);
         if (envKey in process.env) {
             const needsJsonParse = defaultValue && typeof defaultValue === 'object';
             const envValue = process.env[envKey];
             return needsJsonParse ? (tryParse(envValue) ?? defaultValue) : envValue;
         }
-        const config = getConfig();
+        const config = await getConfig();
         return _.get(config, key, defaultValue);
     }
 
-    const value = _getValue();
+    const value = await _getValue();
     switch (typeConverter) {
         case 'number':
             return isNaN(parseFloat(value)) ? defaultValue : parseFloat(value);
@@ -267,11 +269,11 @@ export async function extractFileFromZipBuffer(archiveBuffer, fileExtension) {
  * @returns {Promise<[string, Buffer][]>} Array of image buffers
  */
 export async function getImageBuffers(zipFilePath) {
-    return new Promise((resolve, reject) => {
-        // Check if the zip file exists
-        if (!fs.existsSync(zipFilePath)) {
-            reject(new Error('File not found'));
-            return;
+    return new Promise(async (resolve, reject) => {
+        try {
+            await fs.access(zipFilePath);
+        } catch {
+            return reject(new Error('File not found'));
         }
 
         const imageBuffers = [];
@@ -444,21 +446,26 @@ export function generateTimestamp() {
  * @param {string} prefix File prefix to filter backups by.
  * @param {number?} limit Maximum number of backups to keep. If null, the limit is determined by the `backups.common.numberOfBackups` config value.
  */
-export function removeOldBackups(directory, prefix, limit = null) {
-    const MAX_BACKUPS = limit ?? Number(getConfigValue('backups.common.numberOfBackups', 50, 'number'));
+export async function removeOldBackups(directory, prefix, limit = null) {
+    const MAX_BACKUPS = limit ?? Number(await getConfigValue('backups.common.numberOfBackups', 50, 'number'));
 
-    let files = fs.readdirSync(directory).filter(f => f.startsWith(prefix));
+    let files = (await fs.readdir(directory)).filter(f => f.startsWith(prefix));
     if (files.length > MAX_BACKUPS) {
-        files = files.map(f => path.join(directory, f));
-        files.sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs);
+        const fileStats = await Promise.all(files.map(async f => {
+            const filePath = path.join(directory, f);
+            const stats = await fs.stat(filePath);
+            return { path: filePath, mtimeMs: stats.mtimeMs };
+        }));
 
-        while (files.length > MAX_BACKUPS) {
-            const oldest = files.shift();
+        fileStats.sort((a, b) => a.mtimeMs - b.mtimeMs);
+
+        while (fileStats.length > MAX_BACKUPS) {
+            const oldest = fileStats.shift();
             if (!oldest) {
                 break;
             }
 
-            fs.unlinkSync(oldest);
+            await fs.unlink(oldest.path);
         }
     }
 }
@@ -467,27 +474,27 @@ export function removeOldBackups(directory, prefix, limit = null) {
  * Get a list of images in a directory.
  * @param {string} directoryPath Path to the directory containing the images
  * @param {'name' | 'date'} sortBy Sort images by name or date
- * @returns {string[]} List of image file names
+ * @returns {Promise<string[]>} List of image file names
  */
-export function getImages(directoryPath, sortBy = 'name') {
-    function getSortFunction() {
-        switch (sortBy) {
-            case 'name':
-                return Intl.Collator().compare;
-            case 'date':
-                return (a, b) => fs.statSync(path.join(directoryPath, a)).mtimeMs - fs.statSync(path.join(directoryPath, b)).mtimeMs;
-            default:
-                return (_a, _b) => 0;
-        }
+export async function getImages(directoryPath, sortBy = 'name') {
+    const files = await fs.readdir(directoryPath);
+    const imageFiles = files.filter(file => {
+        const type = mime.lookup(file);
+        return type && type.startsWith('image/');
+    });
+
+    if (sortBy === 'date') {
+        const filesWithStats = await Promise.all(
+            imageFiles.map(async (file) => {
+                const stat = await fs.stat(path.join(directoryPath, file));
+                return { file, mtime: stat.mtimeMs };
+            }),
+        );
+        filesWithStats.sort((a, b) => b.mtime - a.mtime);
+        return filesWithStats.map(item => item.file);
     }
 
-    return fs
-        .readdirSync(directoryPath)
-        .filter(file => {
-            const type = mime.lookup(file);
-            return type && type.startsWith('image/');
-        })
-        .sort(getSortFunction());
+    return imageFiles.sort(Intl.Collator().compare);
 }
 
 /**
@@ -881,8 +888,8 @@ export function stringToBool(str) {
 /**
  * Setup the minimum log level
  */
-export function setupLogLevel() {
-    const logLevel = getConfigValue('logging.minLogLevel', LOG_LEVELS.DEBUG, 'number');
+export async function setupLogLevel() {
+    const logLevel = await getConfigValue('logging.minLogLevel', LOG_LEVELS.DEBUG, 'number');
 
     globalThis.console.debug = logLevel <= LOG_LEVELS.DEBUG ? console.debug : () => { };
     globalThis.console.info = logLevel <= LOG_LEVELS.INFO ? console.info : () => { };
@@ -1071,14 +1078,18 @@ export class MemoryLimitedMap {
 }
 
 /**
- * A 'safe' version of `fs.readFileSync()`. Returns the contents of a file if it exists, falling back to a default value if not.
+ * A 'safe' version of `fs.readFile()`. Returns the contents of a file if it exists, falling back to a default value if not.
  * @param {string} filePath Path of the file to be read.
- * @param {Parameters<typeof fs.readFileSync>[1]} options Options object to pass through to `fs.readFileSync()` (default: `{ encoding: 'utf-8' }`).
- * @returns The contents at `filePath` if it exists, or `null` if not.
+ * @param {Parameters<typeof fs.readFile>[1]} options Options object to pass through to `fs.readFile()` (default: `{ encoding: 'utf-8' }`).
+ * @returns {Promise<string|Buffer|null>} The contents at `filePath` if it exists, or `null` if not.
  */
-export function safeReadFileSync(filePath, options = { encoding: 'utf-8' }) {
-    if (fs.existsSync(filePath)) return fs.readFileSync(filePath, options);
-    return null;
+export async function safeReadFile(filePath, options = { encoding: 'utf-8' }) {
+    try {
+        await fs.access(filePath);
+        return await fs.readFile(filePath, options);
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -1115,32 +1126,32 @@ export function mutateJsonString(jsonString, mutation) {
  * Sets the permissions of a file or directory to be writable.
  * @param {string} targetPath Path to the file or directory
  */
-export function setPermissionsSync(targetPath) {
+export async function setPermissions(targetPath) {
     /**
      * Appends writable permission to the file mode.
      * @param {string} filePath Path to the file
-     * @param {fs.Stats} stats File stats
+     * @param {import('fs').Stats} stats File stats
      */
-    function appendWritablePermission(filePath, stats) {
+    async function appendWritablePermission(filePath, stats) {
         const currentMode = stats.mode;
         const newMode = currentMode | 0o200;
         if (newMode != currentMode) {
-            fs.chmodSync(filePath, newMode);
+            await fs.chmod(filePath, newMode);
         }
     }
 
     try {
-        const stats = fs.statSync(targetPath);
+        const stats = await fs.stat(targetPath);
 
         if (stats.isDirectory()) {
-            appendWritablePermission(targetPath, stats);
-            const files = fs.readdirSync(targetPath);
+            await appendWritablePermission(targetPath, stats);
+            const files = await fs.readdir(targetPath);
 
-            files.forEach((file) => {
-                setPermissionsSync(path.join(targetPath, file));
-            });
+            for (const file of files) {
+                await setPermissions(path.join(targetPath, file));
+            }
         } else {
-            appendWritablePermission(targetPath, stats);
+            await appendWritablePermission(targetPath, stats);
         }
     } catch (error) {
         console.error(`Error setting write permissions for ${targetPath}:`, error);

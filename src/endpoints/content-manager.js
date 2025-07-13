@@ -1,13 +1,13 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
 
 import express from 'express';
 import fetch from 'node-fetch';
 import sanitize from 'sanitize-filename';
-import { sync as writeFileAtomicSync } from  'write-file-atomic';
+import { default as writeFileAtomic } from  'write-file-atomic';
 
-import { getConfigValue, color, setPermissionsSync } from '../util.js';
+import { getConfigValue, color, setPermissions } from '../util.js';
 import { write } from '../character-card-parser.js';
 import { serverDirectory } from '../server-directory.js';
 
@@ -16,7 +16,6 @@ const scaffoldDirectory = path.join(serverDirectory, 'default/scaffold');
 const contentIndexPath = path.join(contentDirectory, 'index.json');
 const scaffoldIndexPath = path.join(scaffoldDirectory, 'index.json');
 
-const WHITELIST_GENERIC_URL_DOWNLOAD_SOURCES = getConfigValue('whitelistImportDomains', []);
 const USER_AGENT = 'SillyTavern';
 
 /**
@@ -55,11 +54,11 @@ export const CONTENT_TYPES = {
 /**
  * Gets the default presets from the content directory.
  * @param {import('../users.js').UserDirectoryList} directories User directories
- * @returns {object[]} Array of default presets
+ * @returns {Promise<object[]>} Array of default presets
  */
-export function getDefaultPresets(directories) {
+export async function getDefaultPresets(directories) {
     try {
-        const contentIndex = getContentIndex();
+        const contentIndex = await getContentIndex();
         const presets = [];
 
         for (const contentItem of contentIndex) {
@@ -80,17 +79,19 @@ export function getDefaultPresets(directories) {
 /**
  * Gets a default JSON file from the content directory.
  * @param {string} filename Name of the file to get
- * @returns {object | null} JSON object or null if the file doesn't exist
+ * @returns {Promise<object | null>} JSON object or null if the file doesn't exist
  */
-export function getDefaultPresetFile(filename) {
+export async function getDefaultPresetFile(filename) {
     try {
         const contentPath = path.join(contentDirectory, filename);
 
-        if (!fs.existsSync(contentPath)) {
+        try {
+            await fs.access(contentPath);
+        } catch {
             return null;
         }
 
-        const fileContent = fs.readFileSync(contentPath, 'utf8');
+        const fileContent = await fs.readFile(contentPath, 'utf8');
         return JSON.parse(fileContent);
     } catch (err) {
         console.warn(`Failed to get default file ${filename}`, err);
@@ -108,12 +109,14 @@ export function getDefaultPresetFile(filename) {
 async function seedContentForUser(contentIndex, directories, forceCategories) {
     let anyContentAdded = false;
 
-    if (!fs.existsSync(directories.root)) {
-        fs.mkdirSync(directories.root, { recursive: true });
+    try {
+        await fs.access(directories.root);
+    } catch {
+        await fs.mkdir(directories.root, { recursive: true });
     }
 
     const contentLogPath = path.join(directories.root, 'content.log');
-    const contentLog = getContentLog(contentLogPath);
+    const contentLog = await getContentLog(contentLogPath);
 
     for (const contentItem of contentIndex) {
         // If the content item is already in the log, skip it
@@ -128,7 +131,9 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
 
         const contentPath = path.join(contentItem.folder, contentItem.filename);
 
-        if (!fs.existsSync(contentPath)) {
+        try {
+            await fs.access(contentPath);
+        } catch {
             console.warn(`Content file ${contentItem.filename} is missing`);
             continue;
         }
@@ -144,18 +149,21 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
         const targetPath = path.join(contentTarget, basePath);
         contentLog.push(contentItem.filename);
 
-        if (fs.existsSync(targetPath)) {
+        try {
+            await fs.access(targetPath);
             console.warn(`Content file ${contentItem.filename} already exists in ${contentTarget}`);
             continue;
+        } catch {
+            // ignore
         }
 
-        fs.cpSync(contentPath, targetPath, { recursive: true, force: false });
-        setPermissionsSync(targetPath);
+        await fs.cp(contentPath, targetPath, { recursive: true, force: false });
+        await setPermissions(targetPath);
         console.info(`Content file ${contentItem.filename} copied to ${contentTarget}`);
         anyContentAdded = true;
     }
 
-    writeFileAtomicSync(contentLogPath, contentLog.join('\n'));
+    await writeFileAtomic(contentLogPath, contentLog.join('\n'));
     return anyContentAdded;
 }
 
@@ -167,12 +175,12 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
  */
 export async function checkForNewContent(directoriesList, forceCategories = []) {
     try {
-        const contentCheckSkip = getConfigValue('skipContentCheck', false, 'boolean');
+        const contentCheckSkip = await getConfigValue('skipContentCheck', false, 'boolean');
         if (contentCheckSkip && forceCategories?.length === 0) {
             return;
         }
 
-        const contentIndex = getContentIndex();
+        const contentIndex = await getContentIndex();
         let anyContentAdded = false;
 
         for (const directories of directoriesList) {
@@ -195,13 +203,14 @@ export async function checkForNewContent(directoriesList, forceCategories = []) 
 
 /**
  * Gets combined content index from the content and scaffold directories.
- * @returns {ContentItem[]} Array of content index
+ * @returns {Promise<ContentItem[]>} Array of content index
  */
-function getContentIndex() {
+async function getContentIndex() {
     const result = [];
 
-    if (fs.existsSync(scaffoldIndexPath)) {
-        const scaffoldIndexText = fs.readFileSync(scaffoldIndexPath, 'utf8');
+    try {
+        await fs.access(scaffoldIndexPath);
+        const scaffoldIndexText = await fs.readFile(scaffoldIndexPath, 'utf8');
         const scaffoldIndex = JSON.parse(scaffoldIndexText);
         if (Array.isArray(scaffoldIndex)) {
             scaffoldIndex.forEach((item) => {
@@ -209,10 +218,13 @@ function getContentIndex() {
             });
             result.push(...scaffoldIndex);
         }
+    } catch {
+        // ignore
     }
 
-    if (fs.existsSync(contentIndexPath)) {
-        const contentIndexText = fs.readFileSync(contentIndexPath, 'utf8');
+    try {
+        await fs.access(contentIndexPath);
+        const contentIndexText = await fs.readFile(contentIndexPath, 'utf8');
         const contentIndex = JSON.parse(contentIndexText);
         if (Array.isArray(contentIndex)) {
             contentIndex.forEach((item) => {
@@ -220,6 +232,8 @@ function getContentIndex() {
             });
             result.push(...contentIndex);
         }
+    } catch {
+        // ignore
     }
 
     return result;
@@ -229,10 +243,10 @@ function getContentIndex() {
  * Gets content by type and format.
  * @param {string} type Type of content
  * @param {'json'|'string'|'raw'} format Format of content
- * @returns {string[]|Buffer[]} Array of content
+ * @returns {Promise<string[] | Buffer<ArrayBufferLike>[]>} Array of content
  */
-export function getContentOfType(type, format) {
-    const contentIndex = getContentIndex();
+export async function getContentOfType(type, format) {
+    const contentIndex = await getContentIndex();
     const indexItems = contentIndex.filter((item) => item.type === type && item.folder);
     const files = [];
     for (const item of indexItems) {
@@ -241,7 +255,7 @@ export function getContentOfType(type, format) {
         }
         try {
             const filePath = path.join(item.folder, item.filename);
-            const fileContent = fs.readFileSync(filePath);
+            const fileContent = await fs.readFile(filePath);
             switch (format) {
                 case 'json':
                     files.push(JSON.parse(fileContent.toString()));
@@ -312,14 +326,16 @@ function getTargetByType(type, directories) {
 /**
  * Gets the content log from the content log file.
  * @param {string} contentLogPath Path to the content log file
- * @returns {string[]} Array of content log lines
+ * @returns {Promise<string[]>} Array of content log lines
  */
-function getContentLog(contentLogPath) {
-    if (!fs.existsSync(contentLogPath)) {
+async function getContentLog(contentLogPath) {
+    try {
+        await fs.access(contentLogPath);
+    } catch {
         return [];
     }
 
-    const contentLogText = fs.readFileSync(contentLogPath, 'utf8');
+    const contentLogText = await fs.readFile(contentLogPath, 'utf8');
     return contentLogText.split('\n');
 }
 
@@ -667,10 +683,11 @@ function getHostFromUrl(url) {
 /**
  * Checks if host is part of generic download source whitelist.
  * @param {String} host Host to check
- * @returns {boolean} If the host is on the whitelist.
+ * @returns {Promise<boolean>} If the host is on the whitelist.
  */
-function isHostWhitelisted(host) {
-    return WHITELIST_GENERIC_URL_DOWNLOAD_SOURCES.includes(host);
+async function isHostWhitelisted(host) {
+    const whitelist = await getConfigValue('whitelistImportDomains', []);
+    return whitelist.includes(host);
 }
 
 export const router = express.Router();
@@ -691,7 +708,7 @@ router.post('/importURL', async (request, response) => {
         const isPygmalionContent = host.includes('pygmalion.chat');
         const isAICharacterCardsContent = host.includes('aicharactercards.com');
         const isRisu = host.includes('realm.risuai.net');
-        const isGeneric = isHostWhitelisted(host);
+        const isGeneric = await isHostWhitelisted(host);
 
         if (isPygmalionContent) {
             const uuid = getUuidFromUrl(url);

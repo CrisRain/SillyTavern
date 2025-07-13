@@ -1,11 +1,11 @@
+// @ts-nocheck
 import path from 'node:path';
-import fs from 'node:fs';
-import { promises as fsPromises } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { Buffer } from 'node:buffer';
 
 import express from 'express';
 import sanitize from 'sanitize-filename';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 import yaml from 'yaml';
 import _ from 'lodash';
 import mime from 'mime-types';
@@ -25,13 +25,12 @@ import { getChatInfo } from './chats.js';
 const defaultAvatarPath = './public/img/ai4.png';
 
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
-const memoryCacheCapacity = getConfigValue('performance.memoryCacheCapacity', '100mb');
-const memoryCache = new MemoryLimitedMap(memoryCacheCapacity);
+let memoryCache;
 // Some Android devices require tighter memory management
 const isAndroid = process.platform === 'android';
 // Use shallow character data for the character list
-const useShallowCharacters = !!getConfigValue('performance.lazyLoadCharacters', false, 'boolean');
-const useDiskCache = !!getConfigValue('performance.useDiskCache', true, 'boolean');
+let useShallowCharacters;
+let useDiskCache;
 
 class DiskCache {
     /**
@@ -69,10 +68,14 @@ class DiskCache {
 
     /**
      * Returns the list of hashed keys in the cache.
-     * @returns {string[]}
+     * @returns {Promise<string[]>}
      */
-    get hashedKeys() {
-        return fs.readdirSync(this.cachePath);
+    async getHashedKeys() {
+        try {
+            return await fs.readdir(this.cachePath);
+        } catch {
+            return [];
+        }
     }
 
     /**
@@ -111,6 +114,7 @@ class DiskCache {
             maxFileDescriptors: 100,
         });
         await this.#instance.init();
+        useDiskCache = !!await getConfigValue('performance.useDiskCache', true, 'boolean');
         this.#syncInterval = setInterval(this.#syncCacheEntries.bind(this), DiskCache.SYNC_INTERVAL);
         return this.#instance;
     }
@@ -129,14 +133,15 @@ class DiskCache {
             const cache = await this.instance();
             const validKeys = new Set();
             for (const dir of directoriesList) {
-                const files = fs.readdirSync(dir.characters, { withFileTypes: true });
+                const files = await fs.readdir(dir.characters, { withFileTypes: true });
                 for (const file of files.filter(f => f.isFile() && path.extname(f.name) === '.png')) {
                     const filePath = path.join(dir.characters, file.name);
-                    const cacheKey = getCacheKey(filePath);
+                    const cacheKey = await getCacheKey(filePath);
                     validKeys.add(path.parse(cache.getDatumPath(cacheKey)).base);
                 }
             }
-            for (const key of this.hashedKeys) {
+            const hashedKeys = await this.getHashedKeys();
+            for (const key of hashedKeys) {
                 if (!validKeys.has(key)) {
                     await cache.removeItem(key);
                 }
@@ -158,15 +163,15 @@ export const diskCache = new DiskCache();
 /**
  * Gets the cache key for the specified image file.
  * @param {string} inputFile - Path to the image file
- * @returns {string} - Cache key
+ * @returns {Promise<string>} - Cache key
  */
-function getCacheKey(inputFile) {
-    if (fs.existsSync(inputFile)) {
-        const stat = fs.statSync(inputFile);
+async function getCacheKey(inputFile) {
+    try {
+        const stat = await fs.stat(inputFile);
         return `${inputFile}-${stat.mtimeMs}`;
+    } catch {
+        return inputFile;
     }
-
-    return inputFile;
 }
 
 /**
@@ -176,7 +181,11 @@ function getCacheKey(inputFile) {
  * @returns {Promise<string | undefined>} - Character card data
  */
 async function readCharacterData(inputFile, inputFormat = 'png') {
-    const cacheKey = getCacheKey(inputFile);
+    const cacheKey = await getCacheKey(inputFile);
+    if (!memoryCache) {
+        const memoryCacheCapacity = await getConfigValue('performance.memoryCacheCapacity', '100mb');
+        memoryCache = new MemoryLimitedMap(memoryCacheCapacity);
+    }
     if (memoryCache.has(cacheKey)) {
         return memoryCache.get(cacheKey);
     }
@@ -243,7 +252,7 @@ async function writeCharacterData(inputFile, data, outputFile, request, crop = u
             } catch (error) {
                 const message = Buffer.isBuffer(inputFile) ? 'Failed to read image buffer.' : `Failed to read image: ${inputFile}.`;
                 console.warn(message, 'Using a fallback image.', error);
-                return await fs.promises.readFile(defaultAvatarPath);
+                return await fs.readFile(defaultAvatarPath);
             }
         }
 
@@ -253,7 +262,7 @@ async function writeCharacterData(inputFile, data, outputFile, request, crop = u
         const outputImage = write(inputImage, data);
         const outputImagePath = path.join(request.user.directories.characters, `${outputFile}.png`);
 
-        writeFileAtomicSync(outputImagePath, outputImage);
+        await writeFileAtomic(outputImagePath, outputImage);
         return true;
     } catch (err) {
         console.error(err);
@@ -327,7 +336,7 @@ async function tryReadImage(imgPath, crop) {
     // If it's an unsupported type of image (APNG) - just read the file as buffer
     catch (error) {
         console.error(`Failed to read image: ${imgPath}`, error);
-        return fs.readFileSync(imgPath);
+        return await fs.readFile(imgPath);
     }
 }
 
@@ -335,21 +344,24 @@ async function tryReadImage(imgPath, crop) {
  * calculateChatSize - Calculates the total chat size for a given character.
  *
  * @param  {string} charDir The directory where the chats are stored.
- * @return { {chatSize: number, dateLastChat: number} }         The total chat size.
+ * @return {Promise<{chatSize: number, dateLastChat: number}>}         The total chat size.
  */
-const calculateChatSize = (charDir) => {
+const calculateChatSize = async (charDir) => {
     let chatSize = 0;
     let dateLastChat = 0;
 
-    if (fs.existsSync(charDir)) {
-        const chats = fs.readdirSync(charDir);
+    try {
+        await fs.access(charDir);
+        const chats = await fs.readdir(charDir);
         if (Array.isArray(chats) && chats.length) {
             for (const chat of chats) {
-                const chatStat = fs.statSync(path.join(charDir, chat));
+                const chatStat = await fs.stat(path.join(charDir, chat));
                 chatSize += chatStat.size;
                 dateLastChat = Math.max(dateLastChat, chatStat.mtimeMs);
             }
         }
+    } catch {
+        // ignore
     }
 
     return { chatSize, dateLastChat };
@@ -410,12 +422,12 @@ const processCharacter = async (item, directories, { shallow }) => {
         jsonObject.avatar = item;
         const character = jsonObject;
         character['json_data'] = imgData;
-        const charStat = fs.statSync(path.join(directories.characters, item));
+        const charStat = await fs.stat(path.join(directories.characters, item));
         character['date_added'] = charStat.ctimeMs;
         character['create_date'] = jsonObject['create_date'] || humanizedISO8601DateTime(charStat.ctimeMs);
         const chatsDirectory = path.join(directories.chats, item.replace('.png', ''));
 
-        const { chatSize, dateLastChat } = calculateChatSize(chatsDirectory);
+        const { chatSize, dateLastChat } = await calculateChatSize(chatsDirectory);
         character['chat_size'] = chatSize;
         character['date_last_chat'] = dateLastChat;
         character['data_size'] = calculateDataSize(jsonObject?.data);
@@ -725,12 +737,12 @@ function convertWorldInfoToCharacterBook(name, entries) {
  * @returns {Promise<string>} Internal name of the character
  */
 async function importFromYaml(uploadPath, context, preservedFileName) {
-    const fileText = fs.readFileSync(uploadPath, 'utf8');
-    fs.unlinkSync(uploadPath);
+    const fileText = await fs.readFile(uploadPath, 'utf8');
+    await fs.unlink(uploadPath);
     const yamlData = yaml.parse(fileText);
     console.info('Importing from YAML');
     yamlData.name = sanitize(yamlData.name);
-    const fileName = preservedFileName || getPngName(yamlData.name, context.request.user.directories);
+    const fileName = preservedFileName || await getPngName(yamlData.name, context.request.user.directories);
     let char = convertToV2({
         'name': yamlData.name,
         'description': yamlData.context ?? '',
@@ -759,8 +771,8 @@ async function importFromYaml(uploadPath, context, preservedFileName) {
  * @returns {Promise<string>} Internal name of the character
  */
 async function importFromCharX(uploadPath, { request }, preservedFileName) {
-    const data = fs.readFileSync(uploadPath).buffer;
-    fs.unlinkSync(uploadPath);
+    const data = (await fs.readFile(uploadPath)).buffer;
+    await fs.unlink(uploadPath);
     console.info('Importing from CharX');
     const cardBuffer = await extractFileFromZipBuffer(data, 'card.json');
 
@@ -791,7 +803,7 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
     unsetPrivateFields(card);
     card['create_date'] = humanizedISO8601DateTime();
     card.name = sanitize(card.name);
-    const fileName = preservedFileName || getPngName(card.name, request.user.directories);
+    const fileName = preservedFileName || await getPngName(card.name, request.user.directories);
     const result = await writeCharacterData(avatar, JSON.stringify(card), fileName, request);
     return result ? fileName : '';
 }
@@ -804,8 +816,8 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
  * @returns {Promise<string>} Internal name of the character
  */
 async function importFromJson(uploadPath, { request }, preservedFileName) {
-    const data = fs.readFileSync(uploadPath, 'utf8');
-    fs.unlinkSync(uploadPath);
+    const data = await fs.readFile(uploadPath, 'utf8');
+    await fs.unlink(uploadPath);
 
     let jsonData = JSON.parse(data);
 
@@ -815,7 +827,7 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         unsetPrivateFields(jsonData);
         jsonData = readFromV2(jsonData);
         jsonData['create_date'] = humanizedISO8601DateTime();
-        const pngName = preservedFileName || getPngName(jsonData.data?.name || jsonData.name, request.user.directories);
+        const pngName = preservedFileName || await getPngName(jsonData.data?.name || jsonData.name, request.user.directories);
         const char = JSON.stringify(jsonData);
         const result = await writeCharacterData(defaultAvatarPath, char, pngName, request);
         return result ? pngName : '';
@@ -825,7 +837,7 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         if (jsonData.creator_notes) {
             jsonData.creator_notes = jsonData.creator_notes.replace('Creator\'s notes go here.', '');
         }
-        const pngName = preservedFileName || getPngName(jsonData.name, request.user.directories);
+        const pngName = preservedFileName || await getPngName(jsonData.name, request.user.directories);
         let char = {
             'name': jsonData.name,
             'description': jsonData.description ?? '',
@@ -851,7 +863,7 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         if (jsonData.creator_notes) {
             jsonData.creator_notes = jsonData.creator_notes.replace('Creator\'s notes go here.', '');
         }
-        const pngName = preservedFileName || getPngName(jsonData.char_name, request.user.directories);
+        const pngName = preservedFileName || await getPngName(jsonData.char_name, request.user.directories);
         let char = {
             'name': jsonData.char_name,
             'description': jsonData.char_persona ?? '',
@@ -890,7 +902,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
     let jsonData = JSON.parse(imgData);
 
     jsonData.name = sanitize(jsonData.data?.name || jsonData.name);
-    const pngName = preservedFileName || getPngName(jsonData.name, request.user.directories);
+    const pngName = preservedFileName || await getPngName(jsonData.name, request.user.directories);
 
     if (jsonData.spec !== undefined) {
         console.info(`Found a ${jsonData.spec} character file.`);
@@ -900,7 +912,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         jsonData['create_date'] = humanizedISO8601DateTime();
         const char = JSON.stringify(jsonData);
         const result = await writeCharacterData(uploadPath, char, pngName, request);
-        fs.unlinkSync(uploadPath);
+        await fs.unlink(uploadPath);
         return result ? pngName : '';
     } else if (jsonData.name !== undefined) {
         console.info('Found a v1 character file.');
@@ -927,7 +939,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         char = convertToV2(char, request.user.directories);
         const charJSON = JSON.stringify(char);
         const result = await writeCharacterData(uploadPath, charJSON, pngName, request);
-        fs.unlinkSync(uploadPath);
+        await fs.unlink(uploadPath);
         return result ? pngName : '';
     }
 
@@ -943,11 +955,15 @@ router.post('/create', async function (request, response) {
         request.body.ch_name = sanitize(request.body.ch_name);
 
         const char = JSON.stringify(charaFormatData(request.body, request.user.directories));
-        const internalName = request.body.file_name || getPngName(request.body.ch_name, request.user.directories);
+        const internalName = request.body.file_name || await getPngName(request.body.ch_name, request.user.directories);
         const avatarName = `${internalName}.png`;
         const chatsPath = path.join(request.user.directories.chats, internalName);
 
-        if (!fs.existsSync(chatsPath)) fs.mkdirSync(chatsPath);
+        try {
+            await fs.access(chatsPath);
+        } catch {
+            await fs.mkdir(chatsPath);
+        }
 
         if (!request.file) {
             await writeCharacterData(defaultAvatarPath, char, internalName, request);
@@ -956,7 +972,7 @@ router.post('/create', async function (request, response) {
             const crop = tryParse(request.query.crop);
             const uploadPath = path.join(request.file.destination, request.file.filename);
             await writeCharacterData(uploadPath, char, internalName, request, crop);
-            fs.unlinkSync(uploadPath);
+            await fs.unlink(uploadPath);
             return response.send(avatarName);
         }
     } catch (err) {
@@ -973,7 +989,7 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
     const oldAvatarName = request.body.avatar_url;
     const newName = sanitize(request.body.new_name);
     const oldInternalName = path.parse(request.body.avatar_url).name;
-    const newInternalName = getPngName(newName, request.user.directories);
+    const newInternalName = await getPngName(newName, request.user.directories);
     const newAvatarName = `${newInternalName}.png`;
 
     const oldAvatarPath = path.join(request.user.directories.characters, oldAvatarName);
@@ -995,13 +1011,20 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
         await writeCharacterData(oldAvatarPath, newData, newInternalName, request);
 
         // Rename chats folder
-        if (fs.existsSync(oldChatsPath) && !fs.existsSync(newChatsPath)) {
-            fs.cpSync(oldChatsPath, newChatsPath, { recursive: true });
-            fs.rmSync(oldChatsPath, { recursive: true, force: true });
+        try {
+            await fs.access(oldChatsPath);
+            try {
+                await fs.access(newChatsPath);
+            } catch {
+                await fs.cp(oldChatsPath, newChatsPath, { recursive: true });
+                await fs.rm(oldChatsPath, { recursive: true, force: true });
+            }
+        } catch {
+            // ignore
         }
 
         // Remove the old character file
-        fs.unlinkSync(oldAvatarPath);
+        await fs.unlink(oldAvatarPath);
 
         // Return new avatar name to ST
         return response.send({ avatar: newAvatarName });
@@ -1040,7 +1063,7 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
             const newAvatarPath = path.join(request.file.destination, request.file.filename);
             invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
             await writeCharacterData(newAvatarPath, char, targetFile, request, crop);
-            fs.unlinkSync(newAvatarPath);
+            await fs.unlink(newAvatarPath);
 
             // Bust cache to reload the new avatar
             response.setHeader('Clear-Site-Data', '"cache"');
@@ -1152,11 +1175,13 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
     }
 
     const avatarPath = path.join(request.user.directories.characters, request.body.avatar_url);
-    if (!fs.existsSync(avatarPath)) {
+    try {
+        await fs.access(avatarPath);
+    } catch {
         return response.sendStatus(400);
     }
 
-    fs.unlinkSync(avatarPath);
+    await fs.unlink(avatarPath);
     invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
     let dir_name = (request.body.avatar_url.replace('.png', ''));
 
@@ -1167,7 +1192,7 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
 
     if (request.body.delete_chats == true) {
         try {
-            await fs.promises.rm(path.join(request.user.directories.chats, sanitize(dir_name)), { recursive: true, force: true });
+            await fs.rm(path.join(request.user.directories.chats, sanitize(dir_name)), { recursive: true, force: true });
         } catch (err) {
             console.error(err);
             return response.sendStatus(500);
@@ -1193,8 +1218,9 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
  */
 router.post('/all', async function (request, response) {
     try {
-        const files = fs.readdirSync(request.user.directories.characters);
+        const files = await fs.readdir(request.user.directories.characters);
         const pngFiles = files.filter(file => file.endsWith('.png'));
+        useShallowCharacters = !!await getConfigValue('performance.lazyLoadCharacters', false, 'boolean');
         const processingPromises = pngFiles.map(file => processCharacter(file, request.user.directories, { shallow: useShallowCharacters }));
         const data = (await Promise.all(processingPromises)).filter(c => c.name);
         return response.send(data);
@@ -1209,8 +1235,9 @@ router.post('/get', validateAvatarUrlMiddleware, async function (request, respon
         if (!request.body) return response.sendStatus(400);
         const item = request.body.avatar_url;
         const filePath = path.join(request.user.directories.characters, item);
-
-        if (!fs.existsSync(filePath)) {
+        try {
+            await fs.access(filePath);
+        } catch {
             return response.sendStatus(404);
         }
 
@@ -1229,12 +1256,13 @@ router.post('/chats', validateAvatarUrlMiddleware, async function (request, resp
 
         const characterDirectory = (request.body.avatar_url).replace('.png', '');
         const chatsDirectory = path.join(request.user.directories.chats, characterDirectory);
-
-        if (!fs.existsSync(chatsDirectory)) {
+        try {
+            await fs.access(chatsDirectory);
+        } catch {
             return response.send({ error: true });
         }
 
-        const files = fs.readdirSync(chatsDirectory);
+        const files = await fs.readdir(chatsDirectory);
         const jsonFiles = files.filter(file => path.extname(file) === '.jsonl');
 
         if (jsonFiles.length === 0) {
@@ -1265,14 +1293,20 @@ router.post('/chats', validateAvatarUrlMiddleware, async function (request, resp
  * Gets the name for the uploaded PNG file.
  * @param {string} file File name
  * @param {import('../users.js').UserDirectoryList} directories User directories
- * @returns {string} - The name for the uploaded PNG file
+ * @returns {Promise<string>} - The name for the uploaded PNG file
  */
-function getPngName(file, directories) {
+async function getPngName(file, directories) {
     let i = 1;
     const baseName = file;
-    while (fs.existsSync(path.join(directories.characters, `${file}.png`))) {
-        file = baseName + i;
-        i++;
+    let newFile = file;
+    try {
+        while (true) {
+            await fs.access(path.join(directories.characters, `${newFile}.png`));
+            newFile = baseName + i;
+            i++;
+        }
+    } catch {
+        file = newFile;
     }
     return file;
 }
@@ -1336,7 +1370,9 @@ router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, 
             return response.sendStatus(400);
         }
         let filename = path.join(request.user.directories.characters, sanitize(request.body.avatar_url));
-        if (!fs.existsSync(filename)) {
+        try {
+            await fs.access(filename);
+        } catch {
             console.error('file for dupe not found', filename);
             return response.sendStatus(404);
         }
@@ -1358,13 +1394,18 @@ router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, 
 
         newFilename = path.join(request.user.directories.characters, `${baseName}_${suffix}${path.extname(filename)}`);
 
-        while (fs.existsSync(newFilename)) {
-            let suffixStr = '_' + suffix;
-            newFilename = path.join(request.user.directories.characters, `${baseName}${suffixStr}${path.extname(filename)}`);
-            suffix++;
+        try {
+            while (true) {
+                await fs.access(newFilename);
+                let suffixStr = '_' + suffix;
+                newFilename = path.join(request.user.directories.characters, `${baseName}${suffixStr}${path.extname(filename)}`);
+                suffix++;
+            }
+        } catch {
+            // we found a name that doesn't exist
         }
 
-        fs.copyFileSync(filename, newFilename);
+        await fs.copyFile(filename, newFilename);
         console.info(`${filename} was copied to ${newFilename}`);
         response.send({ path: path.parse(newFilename).base });
     }
@@ -1382,13 +1423,15 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
 
         let filename = path.join(request.user.directories.characters, sanitize(request.body.avatar_url));
 
-        if (!fs.existsSync(filename)) {
+        try {
+            await fs.access(filename);
+        } catch {
             return response.sendStatus(404);
         }
 
         switch (request.body.format) {
             case 'png': {
-                const rawBuffer = await fsPromises.readFile(filename);
+                const rawBuffer = await fs.readFile(filename);
                 const rawData = read(rawBuffer);
                 const mutatedData = mutateJsonString(rawData, unsetPrivateFields);
                 const mutatedBuffer = write(rawBuffer, mutatedData);

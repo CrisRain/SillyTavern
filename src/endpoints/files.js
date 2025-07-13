@@ -1,9 +1,9 @@
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 
 import express from 'express';
 import sanitize from 'sanitize-filename';
-import { sync as writeFileSyncAtomic } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 
 import { validateAssetFileName } from './assets.js';
 import { clientRelativePath } from '../util.js';
@@ -41,7 +41,7 @@ router.post('/upload', async (request, response) => {
             return response.status(400).send(validation.message);
 
         const pathToUpload = path.join(request.user.directories.files, request.body.name);
-        writeFileSyncAtomic(pathToUpload, request.body.data, 'base64');
+        await writeFileAtomic(pathToUpload, request.body.data, 'base64');
         const url = clientRelativePath(request.user.directories.root, pathToUpload);
         console.info(`Uploaded file: ${url} from ${request.user.profile.handle}`);
         return response.send({ path: url });
@@ -62,11 +62,13 @@ router.post('/delete', async (request, response) => {
             return response.status(400).send('Invalid path');
         }
 
-        if (!fs.existsSync(pathToDelete)) {
+        try {
+            await fs.access(pathToDelete);
+        } catch {
             return response.status(404).send('File not found');
         }
 
-        fs.unlinkSync(pathToDelete);
+        await fs.unlink(pathToDelete);
         console.info(`Deleted file: ${request.body.path} from ${request.user.profile.handle}`);
         return response.sendStatus(200);
     } catch (error) {
@@ -89,8 +91,12 @@ router.post('/verify', async (request, response) => {
                 console.warn(`File verification: Invalid path: ${pathToVerify}`);
                 continue;
             }
-            const fileExists = fs.existsSync(pathToVerify);
-            verified[url] = fileExists;
+            try {
+                await fs.access(pathToVerify);
+                verified[url] = true;
+            } catch {
+                verified[url] = false;
+            }
         }
 
         return response.send(verified);

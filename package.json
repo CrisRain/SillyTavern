@@ -28,6 +28,7 @@
         "@jimp/wasm-webp": "^1.6.0",
         "@mozilla/readability": "^0.6.0",
         "@popperjs/core": "^2.11.8",
+        "@types/sanitize-filename": "^1.1.28",
         "@zeldafan0225/ai_horde": "^5.2.0",
         "archiver": "^7.0.1",
         "bcrypt": "^6.0.0",

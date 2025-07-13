@@ -1,5 +1,5 @@
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import process from 'node:process';
 import { Buffer } from 'node:buffer';
 
@@ -88,29 +88,37 @@ async function migrateCacheToDataDir() {
     const oldCacheDir = path.join(process.cwd(), 'cache');
     const newCacheDir = path.join(globalThis.DATA_ROOT, '_cache');
 
-    if (!fs.existsSync(newCacheDir)) {
-        fs.mkdirSync(newCacheDir, { recursive: true });
+    try {
+        await fs.access(newCacheDir);
+    } catch {
+        await fs.mkdir(newCacheDir, { recursive: true });
     }
 
-    if (fs.existsSync(oldCacheDir) && fs.statSync(oldCacheDir).isDirectory()) {
-        const files = fs.readdirSync(oldCacheDir);
+    try {
+        await fs.access(oldCacheDir);
+        const stats = await fs.stat(oldCacheDir);
+        if (stats.isDirectory()) {
+            const files = await fs.readdir(oldCacheDir);
 
-        if (files.length === 0) {
-            return;
-        }
+            if (files.length === 0) {
+                return;
+            }
 
-        console.log('Migrating model cache files to data directory. Please wait...');
+            console.log('Migrating model cache files to data directory. Please wait...');
 
-        for (const file of files) {
-            try {
-                const oldPath = path.join(oldCacheDir, file);
-                const newPath = path.join(newCacheDir, file);
-                fs.cpSync(oldPath, newPath, { recursive: true, force: true });
-                fs.rmSync(oldPath, { recursive: true, force: true });
-            } catch (error) {
-                console.warn('Failed to migrate cache file. The model will be re-downloaded.', error);
+            for (const file of files) {
+                try {
+                    const oldPath = path.join(oldCacheDir, file);
+                    const newPath = path.join(newCacheDir, file);
+                    await fs.cp(oldPath, newPath, { recursive: true, force: true });
+                    await fs.rm(oldPath, { recursive: true, force: true });
+                } catch (error) {
+                    console.warn('Failed to migrate cache file. The model will be re-downloaded.', error);
+                }
             }
         }
+    } catch {
+        // ignore
     }
 }
 

@@ -1,9 +1,9 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
 
 import express from 'express';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 
 import { Tokenizer } from '@agnai/web-tokenizers';
 import { SentencePieceProcessor } from '@agnai/sentencepiece-js';
@@ -82,13 +82,18 @@ async function getPathToTokenizer(model, fallbackModel) {
         }
 
         const CACHE_PATH = path.join(globalThis.DATA_ROOT, '_cache');
-        if (!fs.existsSync(CACHE_PATH)) {
-            fs.mkdirSync(CACHE_PATH, { recursive: true });
+        try {
+            await fs.access(CACHE_PATH);
+        } catch {
+            await fs.mkdir(CACHE_PATH, { recursive: true });
         }
 
         const cachedFile = path.join(CACHE_PATH, fileName);
-        if (fs.existsSync(cachedFile)) {
+        try {
+            await fs.access(cachedFile);
             return cachedFile;
+        } catch {
+            // ignore
         }
 
         if (!IS_DOWNLOAD_ALLOWED) {
@@ -102,7 +107,7 @@ async function getPathToTokenizer(model, fallbackModel) {
         }
 
         const arrayBuffer = await response.arrayBuffer();
-        writeFileAtomicSync(cachedFile, Buffer.from(arrayBuffer));
+        await writeFileAtomic(cachedFile, Buffer.from(arrayBuffer));
         return cachedFile;
     } catch (error) {
         const getLastSegment = str => str?.split('/')?.pop() || '';
@@ -202,7 +207,7 @@ class WebTokenizer {
 
         try {
             const pathToModel = await getPathToTokenizer(this.#model, this.#fallbackModel);
-            const arrayBuffer = fs.readFileSync(pathToModel).buffer;
+            const arrayBuffer = (await fs.readFile(pathToModel)).buffer;
             this.#instance = await Tokenizer.fromJSON(arrayBuffer);
             console.info('Instantiated the tokenizer for', path.parse(pathToModel).name);
             return this.#instance;

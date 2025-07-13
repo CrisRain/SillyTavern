@@ -1,5 +1,5 @@
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 
 import vectra from 'vectra';
 import express from 'express';
@@ -490,11 +490,13 @@ router.post('/purge-all', async (req, res) => {
     try {
         for (const source of SOURCES) {
             const sourcePath = path.join(req.user.directories.vectors, sanitize(source));
-            if (!fs.existsSync(sourcePath)) {
+            try {
+                await fs.access(sourcePath);
+                await fs.rm(sourcePath, { recursive: true });
+                console.info(`Deleted vector source store at ${sourcePath}`);
+            } catch {
                 continue;
             }
-            await fs.promises.rm(sourcePath, { recursive: true });
-            console.info(`Deleted vector source store at ${sourcePath}`);
         }
 
         return res.sendStatus(200);
@@ -514,11 +516,13 @@ router.post('/purge', async (req, res) => {
 
         for (const source of SOURCES) {
             const sourcePath = path.join(req.user.directories.vectors, sanitize(source), sanitize(collectionId));
-            if (!fs.existsSync(sourcePath)) {
+            try {
+                await fs.access(sourcePath);
+                await fs.rm(sourcePath, { recursive: true });
+                console.info(`Deleted vector index at ${sourcePath}`);
+            } catch {
                 continue;
             }
-            await fs.promises.rm(sourcePath, { recursive: true });
-            console.info(`Deleted vector index at ${sourcePath}`);
         }
 
         return res.sendStatus(200);

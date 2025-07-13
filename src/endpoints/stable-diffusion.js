@@ -1,10 +1,10 @@
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import express from 'express';
 import fetch from 'node-fetch';
 import sanitize from 'sanitize-filename';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 import FormData from 'form-data';
 import urlJoin from 'url-join';
 import _ from 'lodash';
@@ -15,11 +15,11 @@ import { readSecret, SECRET_KEYS } from './secrets.js';
 /**
  * Gets the comfy workflows.
  * @param {import('../users.js').UserDirectoryList} directories
- * @returns {string[]} List of comfy workflows
+ * @returns {Promise<string[]>} List of comfy workflows
  */
-function getComfyWorkflows(directories) {
-    return fs
-        .readdirSync(directories.comfyWorkflows)
+async function getComfyWorkflows(directories) {
+    const files = await fs.readdir(directories.comfyWorkflows);
+    return files
         .filter(file => file[0] !== '.' && file.toLowerCase().endsWith('.json'))
         .sort(Intl.Collator().compare);
 }
@@ -483,7 +483,7 @@ comfy.post('/vaes', async (request, response) => {
 
 comfy.post('/workflows', async (request, response) => {
     try {
-        const data = getComfyWorkflows(request.user.directories);
+        const data = await getComfyWorkflows(request.user.directories);
         return response.send(data);
     } catch (error) {
         console.error(error);
@@ -494,10 +494,12 @@ comfy.post('/workflows', async (request, response) => {
 comfy.post('/workflow', async (request, response) => {
     try {
         let filePath = path.join(request.user.directories.comfyWorkflows, sanitize(String(request.body.file_name)));
-        if (!fs.existsSync(filePath)) {
+        try {
+            await fs.access(filePath);
+        } catch {
             filePath = path.join(request.user.directories.comfyWorkflows, 'Default_Comfy_Workflow.json');
         }
-        const data = fs.readFileSync(filePath, { encoding: 'utf-8' });
+        const data = await fs.readFile(filePath, { encoding: 'utf-8' });
         return response.send(JSON.stringify(data));
     } catch (error) {
         console.error(error);
@@ -508,8 +510,8 @@ comfy.post('/workflow', async (request, response) => {
 comfy.post('/save-workflow', async (request, response) => {
     try {
         const filePath = path.join(request.user.directories.comfyWorkflows, sanitize(String(request.body.file_name)));
-        writeFileAtomicSync(filePath, request.body.workflow, 'utf8');
-        const data = getComfyWorkflows(request.user.directories);
+        await writeFileAtomic(filePath, request.body.workflow, 'utf8');
+        const data = await getComfyWorkflows(request.user.directories);
         return response.send(data);
     } catch (error) {
         console.error(error);
@@ -520,8 +522,11 @@ comfy.post('/save-workflow', async (request, response) => {
 comfy.post('/delete-workflow', async (request, response) => {
     try {
         const filePath = path.join(request.user.directories.comfyWorkflows, sanitize(String(request.body.file_name)));
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
+        try {
+            await fs.access(filePath);
+            await fs.unlink(filePath);
+        } catch {
+            // ignore
         }
         return response.sendStatus(200);
     } catch (error) {
@@ -537,10 +542,10 @@ comfy.post('/generate', async (request, response) => {
 
         const controller = new AbortController();
         request.socket.removeAllListeners('close');
-        request.socket.on('close', function () {
+        request.socket.on('close', async function () {
             if (!response.writableEnded && !item) {
                 const interruptUrl = new URL(urlJoin(request.body.url, '/interrupt'));
-                fetch(interruptUrl, { method: 'POST', headers: { 'Authorization': getBasicAuthHeader(request.body.auth) } });
+                await fetch(interruptUrl, { method: 'POST', headers: { 'Authorization': getBasicAuthHeader(request.body.auth) } });
             }
             controller.abort();
         });
@@ -600,7 +605,7 @@ const together = express.Router();
 
 together.post('/models', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.TOGETHERAI);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.TOGETHERAI);
 
         if (!key) {
             console.warn('TogetherAI key not found.');
@@ -639,7 +644,7 @@ together.post('/models', async (request, response) => {
 
 together.post('/generate', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.TOGETHERAI);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.TOGETHERAI);
 
         if (!key) {
             console.warn('TogetherAI key not found.');
@@ -853,7 +858,7 @@ const stability = express.Router();
 
 stability.post('/generate', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.STABILITY);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.STABILITY);
 
         if (!key) {
             console.warn('Stability AI key not found.');
@@ -913,7 +918,7 @@ const huggingface = express.Router();
 
 huggingface.post('/generate', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.HUGGINGFACE);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.HUGGINGFACE);
 
         if (!key) {
             console.warn('Hugging Face key not found.');
@@ -952,7 +957,7 @@ const nanogpt = express.Router();
 
 nanogpt.post('/models', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
 
         if (!key) {
             console.warn('NanoGPT key not found.');
@@ -962,7 +967,7 @@ nanogpt.post('/models', async (request, response) => {
         const modelsResponse = await fetch('https://nano-gpt.com/api/models', {
             method: 'GET',
             headers: {
-                'x-api-key': key,
+                'x-api-key': await key,
                 'Content-Type': 'application/json',
             },
         });
@@ -992,7 +997,7 @@ nanogpt.post('/models', async (request, response) => {
 
 nanogpt.post('/generate', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
 
         if (!key) {
             console.warn('NanoGPT key not found.');
@@ -1005,7 +1010,7 @@ nanogpt.post('/generate', async (request, response) => {
             method: 'POST',
             body: JSON.stringify(request.body),
             headers: {
-                'x-api-key': key,
+                'x-api-key': await key,
                 'Content-Type': 'application/json',
             },
         });
@@ -1036,7 +1041,7 @@ const bfl = express.Router();
 
 bfl.post('/generate', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.BFL);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.BFL);
 
         if (!key) {
             console.warn('BFL key not found.');
@@ -1098,7 +1103,7 @@ bfl.post('/generate', async (request, response) => {
             body: JSON.stringify(requestBody),
             headers: {
                 'Content-Type': 'application/json',
-                'x-key': key,
+                'x-key': await key,
             },
         });
 
@@ -1181,7 +1186,7 @@ falai.post('/models', async (_request, response) => {
 
 falai.post('/generate', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.FALAI);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.FALAI);
 
         if (!key) {
             console.warn('FAL.AI key not found.');
@@ -1278,7 +1283,7 @@ const xai = express.Router();
 
 xai.post('/generate', async (request, response) => {
     try {
-        const key = readSecret(request.user.directories, SECRET_KEYS.XAI);
+        const key = await readSecret(request.user.directories, SECRET_KEYS.XAI);
 
         if (!key) {
             console.warn('xAI key not found.');

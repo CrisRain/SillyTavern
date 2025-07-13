@@ -20,10 +20,10 @@ router.post('/caption-image', async (request, response) => {
         let apiKey;
         let apiUrl;
         if (useVertexAi) {
-            apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.VERTEXAI);
+            apiKey = request.body.reverse_proxy ? request.body.proxy_password : await readSecret(request.user.directories, SECRET_KEYS.VERTEXAI);
             apiUrl = new URL(request.body.reverse_proxy || API_VERTEX_AI);
         } else {
-            apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE);
+            apiKey = request.body.reverse_proxy ? request.body.proxy_password : await readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE);
             apiUrl = new URL(request.body.reverse_proxy || API_MAKERSUITE);
         }
         const model = request.body.model || 'gemini-2.0-flash';

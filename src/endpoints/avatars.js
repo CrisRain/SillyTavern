@@ -1,10 +1,10 @@
 import path from 'node:path';
-import fs from 'node:fs';
+import { promises as fs } from 'node:fs';
 
 import express from 'express';
 import sanitize from 'sanitize-filename';
 import { Jimp, JimpMime } from '../jimp.js';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { default as writeFileAtomic } from 'write-file-atomic';
 
 import { AVATAR_WIDTH, AVATAR_HEIGHT } from '../constants.js';
 import { getImages, tryParse } from '../util.js';
@@ -12,12 +12,12 @@ import { getFileNameValidationFunction } from '../middleware/validateFileName.js
 
 export const router = express.Router();
 
-router.post('/get', function (request, response) {
-    var images = getImages(request.user.directories.avatars);
+router.post('/get', async function (request, response) {
+    var images = await getImages(request.user.directories.avatars);
     response.send(JSON.stringify(images));
 });
 
-router.post('/delete', getFileNameValidationFunction('avatar'), function (request, response) {
+router.post('/delete', getFileNameValidationFunction('avatar'), async function (request, response) {
     if (!request.body) return response.sendStatus(400);
 
     if (request.body.avatar !== sanitize(request.body.avatar)) {
@@ -27,12 +27,13 @@ router.post('/delete', getFileNameValidationFunction('avatar'), function (reques
 
     const fileName = path.join(request.user.directories.avatars, sanitize(request.body.avatar));
 
-    if (fs.existsSync(fileName)) {
-        fs.unlinkSync(fileName);
+    try {
+        await fs.access(fileName);
+        await fs.unlink(fileName);
         return response.send({ result: 'ok' });
+    } catch {
+        return response.sendStatus(404);
     }
-
-    return response.sendStatus(404);
 });
 
 router.post('/upload', async (request, response) => {
@@ -52,8 +53,8 @@ router.post('/upload', async (request, response) => {
 
         const filename = request.body.overwrite_name || `${Date.now()}.png`;
         const pathToNewFile = path.join(request.user.directories.avatars, filename);
-        writeFileAtomicSync(pathToNewFile, image);
-        fs.unlinkSync(pathToUpload);
+        await writeFileAtomic(pathToNewFile, image);
+        await fs.unlink(pathToUpload);
         return response.send({ path: filename });
     } catch (err) {
         return response.status(400).send('Is not a valid image');

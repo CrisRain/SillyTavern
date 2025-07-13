@@ -5,7 +5,7 @@ import express from 'express';
 import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
-import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, DEFAULT_USER, ensurePublicDirectoriesExist, getUserDirectories } from '../users.js';
+import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, ensurePublicDirectoriesExist, getUserDirectories } from '../users.js';
 import { query } from '../database.js';
 import bcrypt from 'bcrypt';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
@@ -90,7 +90,7 @@ router.post('/login', async (request, response) => {
 
         if (!internalUser) {
             console.log(`User ${dbUser.username} not found locally. Creating new local profile.`);
-            
+
             // 创建与示例代码类似的本地用户
             const salt = getPasswordSalt();
             // 本地不存储密码，因为验证已经在数据库完成
@@ -103,16 +103,16 @@ router.post('/login', async (request, response) => {
                 admin: dbUser.role === 100,
                 enabled: true,
             };
-            
+
             await storage.setItem(toKey(newUser.handle), newUser);
-            
+
             // 创建用户目录
             console.info('Creating data directories for', newUser.handle);
             await ensurePublicDirectoriesExist();
             const directories = getUserDirectories(newUser.handle);
-            
+
             await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS]);
-            
+
             internalUser = newUser;
         }
 
@@ -212,7 +212,7 @@ router.post('/recover-step2', async (request, response) => {
 
         if (request.body.newPassword) {
             const salt = getPasswordSalt();
-            user.password = getPasswordHash(request.body.newPassword, salt);
+            user.password = await getPasswordHash(request.body.newPassword, salt);
             user.salt = salt;
             await storage.setItem(toKey(user.handle), user);
         } else {
